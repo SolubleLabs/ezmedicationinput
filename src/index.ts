@@ -12,7 +12,9 @@ import {
   parseClauseState,
   tokenize
 } from "./parser";
-import { splitSigSegments } from "./segment";
+import { parseSigSegments } from "./hpsg/segmenter";
+import { cloneBodySiteSpatialRelation } from "./body-site-spatial";
+import { cloneExtensions } from "./fhir-translations";
 import {
   BodySiteCode,
   FhirDosage,
@@ -33,6 +35,64 @@ export { suggestSig } from "./suggest";
 export * from "./types";
 export { nextDueDoses, calculateTotalUnits } from "./schedule";
 export { parseStrength, parseStrengthIntoRatio } from "./utils/strength";
+export {
+  buildBodySiteTopographicalModifierCoding,
+  getBodySiteCode,
+  getBodySiteCodeAsync,
+  getBodySiteText,
+  getBodySiteTextAsync,
+  listSupportedBodySiteGrammar,
+  listSupportedBodySiteText,
+  lookupBodySite,
+  lookupBodySiteAsync,
+  suggestBodySiteText,
+  suggestBodySites
+} from "./body-site-lookup";
+export type {
+  BodySiteGrammarVocabulary,
+  BodySiteLookupOptions,
+  BodySiteLookupRequest,
+  BodySiteLookupResult,
+  BodySiteResolver,
+  BodySiteTextLookupRequest,
+  BodySiteTextOptions,
+  BodySiteTextResolver,
+  BodySiteVocabularyOptions
+} from "./body-site-lookup";
+export {
+  BODY_SITE_SPATIAL_RELATION_EXTENSION_URL,
+  buildBodySiteSpatialRelationExtension,
+  buildBodySiteSpatialRelationExtensions,
+  cloneBodySiteSpatialRelation,
+  parseBodySiteSpatialRelationExtension
+} from "./body-site-spatial";
+export {
+  SNOMED_CT_FINDING_SITE_ATTRIBUTE_CODE,
+  SNOMED_CT_FINDING_SITE_ATTRIBUTE_DISPLAY,
+  SNOMED_CT_BILATERAL_QUALIFIER_CODE,
+  SNOMED_CT_BILATERAL_QUALIFIER_DISPLAY,
+  SNOMED_CT_LATERALITY_ATTRIBUTE_CODE,
+  SNOMED_CT_LATERALITY_ATTRIBUTE_DISPLAY,
+  SNOMED_CT_LEFT_QUALIFIER_CODE,
+  SNOMED_CT_LEFT_QUALIFIER_DISPLAY,
+  SNOMED_CT_RIGHT_QUALIFIER_CODE,
+  SNOMED_CT_RIGHT_QUALIFIER_DISPLAY,
+  SNOMED_CT_TOPOGRAPHICAL_MODIFIER_CODE,
+  SNOMED_CT_TOPOGRAPHICAL_MODIFIER_DISPLAY,
+  SNOMED_SYSTEM
+} from "./snomed";
+export {
+  buildSnomedBodySiteLateralityPostcoordinationCode,
+  buildSnomedBodySiteTopographicalModifierPostcoordinationCode,
+  buildSnomedFindingSiteCoding,
+  buildSnomedFindingSitePostcoordinationCode,
+  hasSnomedBodySiteLateralityPostcoordination,
+  hasSnomedFindingSitePostcoordination,
+  hasSnomedTopographicalModifierPostcoordination,
+  parseSnomedBodySiteLateralityPostcoordinationCode,
+  parseSnomedBodySiteTopographicalModifierPostcoordinationCode,
+  parseSnomedFindingSitePostcoordinationCode
+} from "./snomed-postcoordination";
 export {
   getRegisteredSigLocalizations,
   registerSigLocalization,
@@ -107,8 +167,8 @@ function formatMealDashAmount(value: number): string {
 }
 
 function expandMealDashSegment(
-  segment: ReturnType<typeof splitSigSegments>[number]
-): ReturnType<typeof splitSigSegments> {
+  segment: ReturnType<typeof parseSigSegments>[number]
+): ReturnType<typeof parseSigSegments> {
   const tokens = tokenize(segment.text);
   if (tokens.length === 0) {
     return [segment];
@@ -165,20 +225,20 @@ function expandMealDashSegment(
 }
 
 function expandMealDashSegments(
-  segments: ReturnType<typeof splitSigSegments>,
+  segments: ReturnType<typeof parseSigSegments>,
   options?: ParseOptions
-): ReturnType<typeof splitSigSegments> {
+): ReturnType<typeof parseSigSegments> {
   if (!options?.enableMealDashSyntax) {
     return segments;
   }
-  const expanded: ReturnType<typeof splitSigSegments> = [];
+  const expanded: ReturnType<typeof parseSigSegments> = [];
   for (const segment of segments) {
     expanded.push(...expandMealDashSegment(segment));
   }
   return expanded;
 }
 
-function toSegmentMeta(segments: ReturnType<typeof splitSigSegments>): ParseBatchSegmentMeta[] {
+function toSegmentMeta(segments: ReturnType<typeof parseSigSegments>): ParseBatchSegmentMeta[] {
   return segments.map((segment, index) => ({
     index,
     text: segment.text,
@@ -417,7 +477,7 @@ function collectCanonicalClauses(results: ParseResult[]): ParseResult["meta"]["c
 }
 
 export function parseSig(input: string, options?: ParseOptions): ParseBatchResult {
-  const segments = expandMealDashSegments(splitSigSegments(input), options);
+  const segments = expandMealDashSegments(parseSigSegments(input), options);
   const carry: SegmentCarry = {};
   const results: ParseResult[] = [];
 
@@ -432,22 +492,22 @@ export function parseSig(input: string, options?: ParseOptions): ParseBatchResul
     updateCarryForward(carry, state);
   }
 
-  const legacy = resolveLegacyParseResult(results, input, options);
+  const primary = resolvePrimaryParseResult(results, input, options);
 
   return {
     input,
     count: results.length,
     items: results,
-    fhir: legacy.fhir,
-    shortText: legacy.shortText,
-    longText: legacy.longText,
-    warnings: legacy.warnings,
+    fhir: primary.fhir,
+    shortText: primary.shortText,
+    longText: primary.longText,
+    warnings: primary.warnings,
     meta: {
-      ...legacy.meta,
+      ...primary.meta,
       canonical: {
         clauses: results.length
           ? collectCanonicalClauses(results)
-          : legacy.meta.canonical.clauses
+          : primary.meta.canonical.clauses
       },
       segments: toSegmentMeta(segments)
     }
@@ -455,7 +515,7 @@ export function parseSig(input: string, options?: ParseOptions): ParseBatchResul
 }
 
 export function lintSig(input: string, options?: ParseOptions): LintBatchResult {
-  const segments = expandMealDashSegments(splitSigSegments(input), options);
+  const segments = expandMealDashSegments(parseSigSegments(input), options);
   const carry: SegmentCarry = {};
   const results: LintResult[] = [];
 
@@ -489,14 +549,14 @@ export function lintSig(input: string, options?: ParseOptions): LintBatchResult 
     updateCarryForward(carry, state);
   }
 
-  const legacy = resolveLegacyLintResult(results, input, options);
+  const primary = resolvePrimaryLintResult(results, input, options);
 
   return {
     input,
     count: results.length,
     items: results,
-    result: legacy.result,
-    issues: legacy.issues,
+    result: primary.result,
+    issues: primary.issues,
     meta: {
       segments: toSegmentMeta(segments)
     }
@@ -507,7 +567,7 @@ export async function parseSigAsync(
   input: string,
   options?: ParseOptions
 ): Promise<ParseBatchResult> {
-  const segments = expandMealDashSegments(splitSigSegments(input), options);
+  const segments = expandMealDashSegments(parseSigSegments(input), options);
   const carry: SegmentCarry = {};
   const results: ParseResult[] = [];
 
@@ -522,22 +582,22 @@ export async function parseSigAsync(
     updateCarryForward(carry, state);
   }
 
-  const legacy = resolveLegacyParseResult(results, input, options);
+  const primary = resolvePrimaryParseResult(results, input, options);
 
   return {
     input,
     count: results.length,
     items: results,
-    fhir: legacy.fhir,
-    shortText: legacy.shortText,
-    longText: legacy.longText,
-    warnings: legacy.warnings,
+    fhir: primary.fhir,
+    shortText: primary.shortText,
+    longText: primary.longText,
+    warnings: primary.warnings,
     meta: {
-      ...legacy.meta,
+      ...primary.meta,
       canonical: {
         clauses: results.length
           ? collectCanonicalClauses(results)
-          : legacy.meta.canonical.clauses
+          : primary.meta.canonical.clauses
       },
       segments: toSegmentMeta(segments)
     }
@@ -598,7 +658,7 @@ export function fromFhirDosage(
     warnings: clause.warnings ?? [],
     meta: {
       consumedTokens: [],
-      normalized: buildNormalizedMetaFromClause(clause),
+      normalized: buildNormalizedMetaFromClause(clause, dosage),
       canonical: {
         clauses: [clause]
       }
@@ -629,15 +689,16 @@ function getPrimaryClause(
 }
 
 function cloneCoding(
-  coding?: { code?: string; display?: string; system?: string }
-): { code?: string; display?: string; system?: string } | undefined {
+  coding?: { code?: string; display?: string; system?: string; extension?: ReturnType<typeof cloneExtensions> }
+): { code?: string; display?: string; system?: string; extension?: ReturnType<typeof cloneExtensions> } | undefined {
   if (!coding?.code && !coding?.display && !coding?.system) {
     return undefined;
   }
   return {
     code: coding.code,
     display: coding.display,
-    system: coding.system
+    system: coding.system,
+    extension: cloneExtensions(coding.extension)
   };
 }
 
@@ -657,7 +718,8 @@ function cloneBodySiteCoding(coding?: {
 }
 
 function buildNormalizedMetaFromClause(
-  clause: CanonicalSigClause
+  clause: CanonicalSigClause,
+  fhir?: FhirDosage
 ): ParseResult["meta"]["normalized"] {
   const additionalInstructions = clause.additionalInstructions?.length
     ? clause.additionalInstructions.map((instruction) => ({
@@ -665,15 +727,18 @@ function buildNormalizedMetaFromClause(
       coding: cloneCoding(instruction.coding)
     }))
     : undefined;
+  const siteCoding = cloneBodySiteCoding(clause.site?.coding) ??
+    cloneBodySiteCoding(fhir?.site?.coding?.[0]);
 
   return {
     route: clause.route?.code,
     unit: clause.dose?.unit,
     site:
-      clause.site?.text || clause.site?.coding?.code
+      clause.site?.text || clause.site?.coding?.code || clause.site?.spatialRelation
         ? {
           text: clause.site?.text,
-          coding: cloneBodySiteCoding(clause.site?.coding)
+          coding: siteCoding,
+          spatialRelation: cloneBodySiteSpatialRelation(clause.site?.spatialRelation)
         }
         : undefined,
     method:
@@ -688,13 +753,15 @@ function buildNormalizedMetaFromClause(
       clause.prn?.reason?.text || clause.prn?.reason?.coding?.code
         ? {
           text: clause.prn?.reason?.text,
-          coding: cloneCoding(clause.prn?.reason?.coding)
+          coding: cloneCoding(clause.prn?.reason?.coding),
+          spatialRelation: cloneBodySiteSpatialRelation(clause.prn?.reason?.spatialRelation)
         }
         : undefined,
     prnReasons: clause.prn?.reasons?.length
       ? clause.prn.reasons.map((reason) => ({
         text: reason.text,
-        coding: cloneCoding(reason.coding)
+        coding: cloneCoding(reason.coding),
+        spatialRelation: cloneBodySiteSpatialRelation(reason.spatialRelation)
       }))
       : undefined,
     additionalInstructions
@@ -710,7 +777,9 @@ function buildParseResult(
   const localization = resolveSigLocalization(options?.locale, options?.i18n);
   const shortText = formatCanonicalClause(clause, "short", localization, options);
   const longText = formatCanonicalClause(clause, "long", localization, options);
-  const fhir = canonicalToFhir(clause, longText);
+  const fhir = canonicalToFhir(clause, longText, {
+    bodySitePostcoordination: options?.bodySitePostcoordination
+  });
 
   const consumedTokens: string[] = [];
   const leftoverParts: string[] = [];
@@ -770,7 +839,7 @@ function buildParseResult(
     meta: {
       consumedTokens,
       leftoverText: leftoverParts.length ? leftoverParts.join(" ") : undefined,
-      normalized: buildNormalizedMetaFromClause(clause),
+      normalized: buildNormalizedMetaFromClause(clause, fhir),
       canonical: {
         clauses: canonicalClauses
       },
@@ -856,7 +925,7 @@ function shiftRange(range: TextRange | undefined, offset: number): TextRange | u
   };
 }
 
-function resolveLegacyParseResult(
+function resolvePrimaryParseResult(
   results: ParseResult[],
   input: string,
   options?: ParseOptions
@@ -899,7 +968,7 @@ function buildSemanticLintIssues(
   return issues;
 }
 
-function resolveLegacyLintResult(
+function resolvePrimaryLintResult(
   results: LintResult[],
   input: string,
   options?: ParseOptions

@@ -2,9 +2,11 @@ import { buildCanonicalSigClauses } from "./ir";
 import { ParserState } from "./parser-state";
 import type { SigLocalization, SigLongContext, SigShortContext } from "./i18n";
 import { getPreferredCanonicalPrnReasonText } from "./prn";
+import { resolveBodySitePhrase } from "./body-site-grammar";
 import {
   AdviceArgumentRole,
   AdviceRelation,
+  BodySiteSpatialRelation,
   CanonicalDoseExpr,
   CanonicalScheduleExpr,
   CanonicalSigClause,
@@ -141,6 +143,11 @@ const ROUTE_GRAMMAR: Partial<Record<RouteCode, RouteGrammar>> = {
     routePhrase: ({ hasSite }) => (hasSite ? undefined : "intravenously"),
     sitePreposition: "into"
   },
+  [RouteCode["Otic route"]]: {
+    verb: "Instill",
+    routePhrase: ({ hasSite }) => (hasSite ? undefined : "in the ear"),
+    sitePreposition: "in"
+  },
   [RouteCode["Nasal route"]]: {
     verb: "Use",
     routePhrase: ({ hasSite }) => (hasSite ? undefined : "via nasal route"),
@@ -194,6 +201,9 @@ function grammarFromRouteText(text: string | undefined): RouteGrammar | undefine
   }
   if (normalized.includes("vagin")) {
     return ROUTE_GRAMMAR[RouteCode["Per vagina"]];
+  }
+  if (normalized.includes("otic") || normalized.includes("ear")) {
+    return ROUTE_GRAMMAR[RouteCode["Otic route"]];
   }
   if (normalized.includes("nasal")) {
     return ROUTE_GRAMMAR[RouteCode["Nasal route"]];
@@ -278,7 +288,11 @@ function formatPatientInstructionSentence(text: string | undefined): string | un
   if (!trimmed) {
     return undefined;
   }
-  const sentence = /^[.!?]$/.test(trimmed.slice(-1)) ? trimmed : `${trimmed}.`;
+  const normalized = trimmed.toLowerCase();
+  const instruction = /^(after|before|with)\b/.test(normalized)
+    ? `Use ${trimmed}`
+    : trimmed;
+  const sentence = /^[.!?]$/.test(instruction.slice(-1)) ? instruction : `${instruction}.`;
   return sentence.charAt(0).toUpperCase() + sentence.slice(1);
 }
 
@@ -682,8 +696,67 @@ function buildRoutePhrase(
   return `via ${text}`;
 }
 
+const ENGLISH_SPATIAL_PREPOSITIONS: Record<string, string> = {
+  above: "above",
+  around: "around",
+  behind: "behind",
+  below: "below",
+  beneath: "beneath",
+  between: "between",
+  inside: "in",
+  near: "near",
+  outside: "outside",
+  under: "under"
+};
+
+function renderSpatialSiteEnglish(
+  relation: BodySiteSpatialRelation | undefined,
+  grammar: RouteGrammar
+): string | undefined {
+  if (!relation?.relationText) {
+    return undefined;
+  }
+  const rawTarget = relation.targetText ?? relation.targetCoding?.display;
+  if (!rawTarget) {
+    return undefined;
+  }
+  const resolvedTarget = resolveBodySitePhrase(rawTarget);
+  const target = resolvedTarget?.englishObjectText ??
+    `the ${rawTarget.charAt(0).toLowerCase()}${rawTarget.slice(1)}`;
+  const preposition = ENGLISH_SPATIAL_PREPOSITIONS[relation.relationText];
+  if (preposition) {
+    return `${preposition} ${target}`;
+  }
+  switch (relation.relationText) {
+    case "back":
+    case "center":
+    case "centre":
+    case "front":
+    case "left side":
+    case "middle":
+    case "right side":
+    case "side":
+    case "both sides":
+    case "bilateral sides":
+    case "top":
+      return `${grammar.sitePreposition ?? "at"} ${
+        relation.relationText.startsWith("both") || relation.relationText.startsWith("bilateral")
+          ? relation.relationText
+          : `the ${relation.relationText}`
+      } of ${target}`.trim();
+    default:
+      return undefined;
+  }
+}
+
 function formatSite(clause: CanonicalSigClause, grammar: RouteGrammar): string | undefined {
   let text = clause.site?.text?.trim();
+  if (!text) {
+    const spatialSite = renderSpatialSiteEnglish(clause.site?.spatialRelation, grammar);
+    if (spatialSite) {
+      return spatialSite;
+    }
+  }
   if (!text) {
     const display = clause.site?.coding?.display?.trim();
     if (display) {
@@ -695,7 +768,9 @@ function formatSite(clause: CanonicalSigClause, grammar: RouteGrammar): string |
   if (!text) {
     return undefined;
   }
-  const lower = text.toLowerCase();
+  const resolvedSite = resolveBodySitePhrase(text);
+  const normalizedText = resolvedSite?.displayText ?? text;
+  const lower = normalizedText.toLowerCase();
   const routeText = clause.route?.text?.trim().toLowerCase();
   const isRectalRoute =
     clause.route?.code === RouteCode["Per rectum"] ||
@@ -711,47 +786,19 @@ function formatSite(clause: CanonicalSigClause, grammar: RouteGrammar): string |
   if (isVaginalRoute && (lower === "vagina" || lower === "vaginal")) {
     return undefined;
   }
+  if (resolvedSite?.features.kind === "locative") {
+    return resolvedSite.englishObjectText;
+  }
+  const preferredPreposition = resolvedSite?.preferredPreposition;
   let preposition = grammar.sitePreposition;
+  if (!preposition || (preposition === "to" && preferredPreposition && preferredPreposition !== "to")) {
+    preposition = preferredPreposition;
+  }
   if (!preposition) {
-    if (lower.includes("eye")) {
-      preposition = "in";
-    } else if (lower.includes("nostril") || lower.includes("nose")) {
-      preposition = "into";
-    } else if (lower.includes("lung") || lower.includes("airway") || lower.includes("bronch")) {
-      preposition = "into";
-    } else if (lower.includes("ear")) {
-      preposition = "in";
-    } else if (
-      /(skin|head|temple|arm|leg|thigh|abdomen|shoulder|elbow|wrist|ankle|knee|hand|foot|cheek|forearm|back|chest|breast|axilla|armpit|groin|lip|buttock|hip|face|hair|scalp|forehead|eyelid|chin|neck)/.test(
-        lower
-      )
-    ) {
-      preposition = "to";
-    } else {
-      preposition = "at";
-    }
+    preposition = "at";
   }
-  const noun = formatSiteNoun(text, preposition);
+  const noun = resolvedSite?.englishObjectText ?? `the ${normalizedText}`;
   return `${preposition} ${noun}`.trim();
-}
-
-function formatSiteNoun(site: string, preposition: string): string {
-  const trimmed = site.trim();
-  const lower = trimmed.toLowerCase();
-  const skipArticlePrefixes = ["the ", "both ", "each ", "either ", "every ", "all ", "bilateral "];
-  for (const prefix of skipArticlePrefixes) {
-    if (lower.startsWith(prefix)) {
-      return trimmed;
-    }
-  }
-  const needsArticle =
-    /^(left|right|upper|lower|inner|outer|mid|middle|posterior|anterior|proximal|distal|medial|lateral|dorsal|ventral)\b/.test(
-      lower
-    );
-  if (needsArticle || preposition === "at") {
-    return `the ${trimmed}`;
-  }
-  return `the ${trimmed}`;
 }
 
 function describeDayOfWeek(schedule: CanonicalScheduleExpr | undefined): string | undefined {

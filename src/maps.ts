@@ -7,10 +7,18 @@ import {
   RouteCode,
   SNOMEDCTRouteCodes
 } from "./types";
+import {
+  SNOMED_CT_BILATERAL_QUALIFIER_CODE,
+  SNOMED_CT_BILATERAL_QUALIFIER_DISPLAY,
+  SNOMED_CT_LEFT_QUALIFIER_CODE,
+  SNOMED_CT_LEFT_QUALIFIER_DISPLAY,
+  SNOMED_CT_RIGHT_QUALIFIER_CODE,
+  SNOMED_CT_RIGHT_QUALIFIER_DISPLAY,
+  SNOMED_SYSTEM
+} from "./snomed";
+import { buildSnomedBodySiteLateralityPostcoordinationCode } from "./snomed-postcoordination";
 import { objectEntries, objectFromEntries } from "./utils/object";
 import { normalizeLoosePhraseKey } from "./utils/text";
-
-const SNOMED_SYSTEM = "http://snomed.info/sct";
 
 type RouteSnomedEntry = [
   RouteCode,
@@ -208,56 +216,273 @@ export function normalizeBodySiteKey(value: string): string {
   return normalizeLoosePhraseKey(value);
 }
 
-export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
+type BodySiteSnomedSourceEntry = {
   names: string[];
   definition: BodySiteDefinition;
-}> = [
+};
+
+interface LateralizableBodySiteDefinition {
+  text: string;
+  pluralText: string;
+  code: string;
+  display: string;
+  englishNames: string[];
+  pluralEnglishNames: string[];
+  thaiNames: string[];
+  routeHint?: RouteCode;
+}
+
+const BODY_SITE_LATERALITIES = [
+  {
+    textPrefix: "left",
+    englishPrefix: "left",
+    thaiSuffixes: ["ซ้าย"],
+    code: SNOMED_CT_LEFT_QUALIFIER_CODE,
+    display: SNOMED_CT_LEFT_QUALIFIER_DISPLAY
+  },
+  {
+    textPrefix: "right",
+    englishPrefix: "right",
+    thaiSuffixes: ["ขวา"],
+    code: SNOMED_CT_RIGHT_QUALIFIER_CODE,
+    display: SNOMED_CT_RIGHT_QUALIFIER_DISPLAY
+  },
+  {
+    textPrefix: "both",
+    englishPrefix: "both",
+    thaiSuffixes: ["ทั้งสองข้าง", "สองข้าง"],
+    code: SNOMED_CT_BILATERAL_QUALIFIER_CODE,
+    display: SNOMED_CT_BILATERAL_QUALIFIER_DISPLAY
+  }
+] as const;
+
+const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
+  {
+    text: "thumb",
+    pluralText: "thumbs",
+    code: "76505004",
+    display: "Thumb",
+    englishNames: ["thumb"],
+    pluralEnglishNames: ["thumbs"],
+    thaiNames: ["นิ้วโป้ง", "นิ้วโป้งมือ", "นิ้วหัวแม่มือ", "หัวแม่มือ"]
+  },
+  {
+    text: "index finger",
+    pluralText: "index fingers",
+    code: "83738005",
+    display: "Index finger",
+    englishNames: ["index finger"],
+    pluralEnglishNames: ["index fingers"],
+    thaiNames: ["นิ้วชี้", "นิ้วชี้มือ"]
+  },
+  {
+    text: "middle finger",
+    pluralText: "middle fingers",
+    code: "65531009",
+    display: "Middle finger",
+    englishNames: ["middle finger"],
+    pluralEnglishNames: ["middle fingers"],
+    thaiNames: ["นิ้วกลาง", "นิ้วกลางมือ"]
+  },
+  {
+    text: "ring finger",
+    pluralText: "ring fingers",
+    code: "82002001",
+    display: "Ring finger",
+    englishNames: ["ring finger"],
+    pluralEnglishNames: ["ring fingers"],
+    thaiNames: ["นิ้วนาง", "นิ้วนางมือ"]
+  },
+  {
+    text: "little finger",
+    pluralText: "little fingers",
+    code: "12406000",
+    display: "Little finger",
+    englishNames: ["little finger", "pinky", "pinkie"],
+    pluralEnglishNames: ["little fingers", "pinkies"],
+    thaiNames: ["นิ้วก้อย", "นิ้วก้อยมือ"]
+  },
+  {
+    text: "great toe",
+    pluralText: "great toes",
+    code: "78883009",
+    display: "Great toe",
+    englishNames: ["great toe", "big toe"],
+    pluralEnglishNames: ["great toes", "big toes"],
+    thaiNames: ["นิ้วโป้งเท้า", "นิ้วหัวแม่เท้า", "หัวแม่เท้า"]
+  },
+  {
+    text: "second toe",
+    pluralText: "second toes",
+    code: "55078004",
+    display: "Second toe",
+    englishNames: ["second toe", "2nd toe"],
+    pluralEnglishNames: ["second toes", "2nd toes"],
+    thaiNames: ["นิ้วชี้เท้า"]
+  },
+  {
+    text: "third toe",
+    pluralText: "third toes",
+    code: "78132007",
+    display: "Third toe",
+    englishNames: ["third toe", "3rd toe"],
+    pluralEnglishNames: ["third toes", "3rd toes"],
+    thaiNames: ["นิ้วกลางเท้า"]
+  },
+  {
+    text: "fourth toe",
+    pluralText: "fourth toes",
+    code: "80349001",
+    display: "Fourth toe",
+    englishNames: ["fourth toe", "4th toe"],
+    pluralEnglishNames: ["fourth toes", "4th toes"],
+    thaiNames: ["นิ้วนางเท้า"]
+  },
+  {
+    text: "fifth toe",
+    pluralText: "fifth toes",
+    code: "39915008",
+    display: "Fifth toe",
+    englishNames: ["fifth toe", "5th toe", "little toe"],
+    pluralEnglishNames: ["fifth toes", "5th toes", "little toes"],
+    thaiNames: ["นิ้วก้อยเท้า"]
+  }
+];
+
+function buildLateralizedDigitBodySiteEntries(): BodySiteSnomedSourceEntry[] {
+  const entries: BodySiteSnomedSourceEntry[] = [];
+  for (const site of LATERALIZABLE_DIGIT_BODY_SITES) {
+    for (const laterality of BODY_SITE_LATERALITIES) {
+      const isBilateral = laterality.textPrefix === "both";
+      const text = `${laterality.textPrefix} ${isBilateral ? site.pluralText : site.text}`;
+      const englishNames = isBilateral ? site.pluralEnglishNames : site.englishNames;
+      const names = englishNames.map((name) => `${laterality.englishPrefix} ${name}`);
+      for (const name of site.thaiNames) {
+        for (const suffix of laterality.thaiSuffixes) {
+          names.push(`${name}${suffix}`);
+        }
+      }
+      entries.push({
+        names,
+        definition: {
+          coding: {
+            system: SNOMED_SYSTEM,
+            code: buildSnomedBodySiteLateralityPostcoordinationCode(
+              site.code,
+              laterality.code
+            ),
+            display: text
+          },
+          text,
+          routeHint: site.routeHint ?? RouteCode["Topical route"]
+        }
+      });
+    }
+  }
+  return entries;
+}
+
+export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
     {
-      names: ["eye", "eyes"],
+      names: ["eye", "eyes", "ตา"],
       definition: {
         coding: { code: "81745001", display: "Eye" },
+        text: "eye",
         routeHint: RouteCode["Ophthalmic route"]
       }
     },
     {
-      names: ["left eye"],
+      names: ["left eye", "ตาซ้าย"],
       definition: {
         coding: { code: "1290031003", display: "Structure of left eye proper" },
+        text: "left eye",
         routeHint: RouteCode["Ophthalmic route"]
       }
     },
     {
-      names: ["right eye"],
+      names: ["right eye", "ตาขวา"],
       definition: {
         coding: { code: "1290032005", display: "Structure of right eye proper" },
+        text: "right eye",
         routeHint: RouteCode["Ophthalmic route"]
       }
     },
     {
-      names: ["both eyes", "bilateral eyes"],
+      names: ["both eyes", "bilateral eyes", "ตาทั้งสองข้าง", "ตาสองข้าง"],
       definition: {
         coding: { code: "40638003", display: "Structure of both eyes" },
+        text: "both eyes",
         routeHint: RouteCode["Ophthalmic route"]
       }
     },
     {
-      names: ["ear", "ears"],
+      names: ["ear", "inside ear", "หู"],
       definition: {
         coding: { code: "117590005", display: "Ear-related structure" },
+        text: "ear",
         routeHint: RouteCode["Otic route"]
       }
     },
     {
-      names: ["left ear"],
-      definition: { coding: { code: "89644007", display: "Left ear" }, routeHint: RouteCode["Otic route"] }
+      names: ["ears", "both ears", "bilateral ears", "inside ears", "หูทั้งสองข้าง", "หูสองข้าง"],
+      definition: {
+        coding: { code: "34338003", display: "Both ears" },
+        text: "both ears",
+        routeHint: RouteCode["Otic route"]
+      }
     },
     {
-      names: ["right ear"],
-      definition: { coding: { code: "25577004", display: "Right ear" }, routeHint: RouteCode["Otic route"] }
+      names: [
+        "ear canal",
+        "inside ear canal",
+        "external auditory canal",
+        "external ear canal"
+      ],
+      definition: {
+        coding: { code: "181178004", display: "Entire external auditory canal" },
+        text: "ear canal",
+        routeHint: RouteCode["Otic route"]
+      }
     },
     {
-      names: ["both ears", "bilateral ears"],
-      definition: { coding: { code: "34338003", display: "Both ears" }, routeHint: RouteCode["Otic route"] }
+      names: ["ear canals", "both ear canals", "inside ear canals", "both external auditory canals"],
+      definition: {
+        coding: { code: "181178004", display: "Entire external auditory canal" },
+        text: "both ear canals",
+        routeHint: RouteCode["Otic route"]
+      }
+    },
+    {
+      names: ["left ear", "หูซ้าย"],
+      definition: {
+        coding: { code: "89644007", display: "Left ear" },
+        text: "left ear",
+        routeHint: RouteCode["Otic route"]
+      }
+    },
+    {
+      names: ["right ear", "หูขวา"],
+      definition: {
+        coding: { code: "25577004", display: "Right ear" },
+        text: "right ear",
+        routeHint: RouteCode["Otic route"]
+      }
+    },
+    {
+      names: ["left ear canal", "left external auditory canal"],
+      definition: {
+        coding: { code: "368588007", display: "Entire left external auditory canal" },
+        text: "left ear canal",
+        routeHint: RouteCode["Otic route"]
+      }
+    },
+    {
+      names: ["right ear canal", "right external auditory canal"],
+      definition: {
+        coding: { code: "368566007", display: "Entire right external auditory canal" },
+        text: "right ear canal",
+        routeHint: RouteCode["Otic route"]
+      }
     },
     {
       names: ["nostril", "nostrils"],
@@ -323,19 +548,28 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
       definition: { coding: { code: "1162715001", display: "All teeth" }, routeHint: RouteCode["Topical route"] }
     },
     {
-      names: ["arm", "upper arm"],
-      definition: { coding: { code: "302538001", display: "Entire upper arm" }, routeHint: RouteCode["Topical route"] }
-    },
-    {
-      names: ["left arm", "left upper arm"],
+      names: ["arm", "upper arm", "แขน"],
       definition: {
-        coding: { code: "368208006", display: "Left upper arm structure" },
+        coding: { code: "302538001", display: "Entire upper arm" },
+        text: "arm",
         routeHint: RouteCode["Topical route"]
       }
     },
     {
-      names: ["right arm", "right upper arm"],
-      definition: { coding: { code: "368209003", display: "Right upper arm" }, routeHint: RouteCode["Topical route"] }
+      names: ["left arm", "left upper arm", "แขนซ้าย"],
+      definition: {
+        coding: { code: "368208006", display: "Left upper arm structure" },
+        text: "left arm",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["right arm", "right upper arm", "แขนขวา"],
+      definition: {
+        coding: { code: "368209003", display: "Right upper arm" },
+        text: "right arm",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["both arms", "bilateral arms"],
@@ -378,19 +612,28 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
       definition: { coding: { code: "368149001", display: "Right elbow" }, routeHint: RouteCode["Topical route"] }
     },
     {
-      names: ["leg", "lower leg"],
+      names: ["leg", "lower leg", "ขา"],
       definition: {
         coding: { code: "362793004", display: "Entire lower leg, from knee to ankle" },
+        text: "leg",
         routeHint: RouteCode["Topical route"]
       }
     },
     {
-      names: ["left leg", "left lower leg"],
-      definition: { coding: { code: "213384005", display: "Entire left lower leg" }, routeHint: RouteCode["Topical route"] }
+      names: ["left leg", "left lower leg", "ขาซ้าย"],
+      definition: {
+        coding: { code: "213384005", display: "Entire left lower leg" },
+        text: "left leg",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["right leg", "right lower leg"],
-      definition: { coding: { code: "213289002", display: "Entire right lower leg" }, routeHint: RouteCode["Topical route"] }
+      names: ["right leg", "right lower leg", "ขาขวา"],
+      definition: {
+        coding: { code: "213289002", display: "Entire right lower leg" },
+        text: "right leg",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["both legs", "bilateral legs"],
@@ -465,36 +708,323 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
       definition: { coding: { code: "287579007", display: "Right hip" }, routeHint: RouteCode["Topical route"] }
     },
     {
-      names: ["hand", "hands"],
-      definition: { coding: { code: "85562004", display: "Hand" }, routeHint: RouteCode["Topical route"] }
+      names: ["hand", "hands", "มือ"],
+      definition: {
+        coding: { code: "85562004", display: "Hand" },
+        text: "hand",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["left hand"],
-      definition: { coding: { code: "85151006", display: "Left hand" }, routeHint: RouteCode["Topical route"] }
+      names: ["left hand", "มือซ้าย"],
+      definition: {
+        coding: { code: "85151006", display: "Left hand" },
+        text: "left hand",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["right hand"],
-      definition: { coding: { code: "78791008", display: "Right hand" }, routeHint: RouteCode["Topical route"] }
+      names: ["right hand", "มือขวา"],
+      definition: {
+        coding: { code: "78791008", display: "Right hand" },
+        text: "right hand",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["foot", "feet"],
-      definition: { coding: { code: "56459004", display: "Foot" }, routeHint: RouteCode["Topical route"] }
+      names: ["finger", "fingers"],
+      definition: {
+        coding: { code: "7569003", display: "Finger structure" },
+        text: "fingers",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["left foot"],
-      definition: { coding: { code: "22335008", display: "Left foot" }, routeHint: RouteCode["Topical route"] }
+      names: ["นิ้วมือ"],
+      definition: {
+        coding: { code: "7569003", display: "Finger structure" },
+        text: "fingers",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["right foot"],
-      definition: { coding: { code: "7769000", display: "Right foot" }, routeHint: RouteCode["Topical route"] }
+      names: ["between fingers", "ระหว่างนิ้ว", "ระหว่างนิ้วมือ"],
+      definition: {
+        text: "between fingers",
+        spatialRelation: {
+          relationText: "between",
+          targetText: "fingers",
+          targetCoding: {
+            system: SNOMED_SYSTEM,
+            code: "7569003",
+            display: "Finger structure"
+          },
+          sourceText: "between fingers"
+        },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["thumb", "นิ้วโป้ง", "นิ้วโป้งมือ", "นิ้วหัวแม่มือ", "หัวแม่มือ"],
+      definition: {
+        coding: { code: "76505004", display: "Thumb" },
+        text: "thumb",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["index finger", "นิ้วชี้", "นิ้วชี้มือ"],
+      definition: {
+        coding: { code: "83738005", display: "Index finger" },
+        text: "index finger",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["middle finger", "นิ้วกลาง", "นิ้วกลางมือ"],
+      definition: {
+        coding: { code: "65531009", display: "Middle finger" },
+        text: "middle finger",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["ring finger", "นิ้วนาง", "นิ้วนางมือ"],
+      definition: {
+        coding: { code: "82002001", display: "Ring finger" },
+        text: "ring finger",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["little finger", "pinky", "pinkie", "นิ้วก้อย", "นิ้วก้อยมือ"],
+      definition: {
+        coding: { code: "12406000", display: "Little finger" },
+        text: "little finger",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["toe", "toes"],
+      definition: {
+        coding: { code: "29707007", display: "Toe structure" },
+        text: "toes",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["นิ้วเท้า"],
+      definition: {
+        coding: { code: "29707007", display: "Toe structure" },
+        text: "toes",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["between toes", "ระหว่างนิ้วเท้า"],
+      definition: {
+        text: "between toes",
+        spatialRelation: {
+          relationText: "between",
+          targetText: "toes",
+          targetCoding: {
+            system: SNOMED_SYSTEM,
+            code: "29707007",
+            display: "Toe structure"
+          },
+          sourceText: "between toes"
+        },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["great toe", "big toe", "นิ้วโป้งเท้า", "นิ้วหัวแม่เท้า", "หัวแม่เท้า"],
+      definition: {
+        coding: { code: "78883009", display: "Great toe" },
+        text: "great toe",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["second toe", "2nd toe", "นิ้วชี้เท้า"],
+      definition: {
+        coding: { code: "55078004", display: "Second toe" },
+        text: "second toe",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["third toe", "3rd toe", "นิ้วกลางเท้า"],
+      definition: {
+        coding: { code: "78132007", display: "Third toe" },
+        text: "third toe",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["fourth toe", "4th toe", "นิ้วนางเท้า"],
+      definition: {
+        coding: { code: "80349001", display: "Fourth toe" },
+        text: "fourth toe",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["fifth toe", "5th toe", "little toe", "นิ้วก้อยเท้า"],
+      definition: {
+        coding: { code: "39915008", display: "Fifth toe" },
+        text: "fifth toe",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    ...buildLateralizedDigitBodySiteEntries(),
+    {
+      names: ["back of hand", "dorsum of hand"],
+      definition: {
+        coding: { code: "731077003", display: "Entire dorsum of hand" },
+        text: "back of hand",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["backs of hands", "both backs of hands", "both dorsa of hands"],
+      definition: {
+        coding: { code: "731077003", display: "Entire dorsum of hand" },
+        text: "both backs of hands",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["palm", "palm of hand", "palm of the hand"],
+      definition: {
+        coding: { code: "731973001", display: "Entire palm (region)" },
+        text: "palm",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["palms", "both palms"],
+      definition: {
+        coding: { code: "731973001", display: "Entire palm (region)" },
+        text: "both palms",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["foot", "feet", "เท้า"],
+      definition: {
+        coding: { code: "56459004", display: "Foot" },
+        text: "foot",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["left foot", "เท้าซ้าย"],
+      definition: {
+        coding: { code: "22335008", display: "Left foot" },
+        text: "left foot",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["right foot", "เท้าขวา"],
+      definition: {
+        coding: { code: "7769000", display: "Right foot" },
+        text: "right foot",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["abdomen", "abdominal", "belly"],
-      definition: { coding: { code: "302553009", display: "Entire abdomen" }, routeHint: RouteCode["Subcutaneous route"] }
+      definition: {
+        coding: { code: "302553009", display: "Entire abdomen" },
+        text: "abdomen",
+        routeHint: RouteCode["Subcutaneous route"]
+      }
     },
     {
-      names: ["head"],
-      definition: { coding: { code: "69536005", display: "Head structure" }, routeHint: RouteCode["Topical route"] }
+      names: ["head", "หัว", "ศีรษะ"],
+      definition: {
+        coding: { code: "69536005", display: "Head structure" },
+        text: "head",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["top of head"],
+      definition: { text: "top of head", routeHint: RouteCode["Topical route"] }
+    },
+    {
+      names: ["back of head"],
+      definition: {
+        coding: { code: "182322006", display: "Entire back of head" },
+        text: "back of head",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["sole", "sole of foot", "sole of the foot"],
+      definition: {
+        coding: { code: "731075006", display: "Entire sole of foot" },
+        text: "sole of foot",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["soles", "both soles", "sole of feet", "soles of feet"],
+      definition: {
+        coding: { code: "731075006", display: "Entire sole of foot" },
+        text: "both soles",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["heel"],
+      definition: {
+        coding: { code: "362804005", display: "Entire heel" },
+        text: "heel",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["heels", "both heels"],
+      definition: {
+        coding: { code: "362804005", display: "Entire heel" },
+        text: "both heels",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["left heel"],
+      definition: {
+        coding: { code: "723606006", display: "Structure of left heel" },
+        text: "left heel",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["right heel"],
+      definition: {
+        coding: { code: "723607002", display: "Structure of right heel" },
+        text: "right heel",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["back of foot", "dorsum of foot"],
+      definition: {
+        coding: { code: "731036002", display: "Entire dorsum of foot" },
+        text: "back of foot",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["backs of feet", "both backs of feet", "both dorsa of feet"],
+      definition: {
+        coding: { code: "731036002", display: "Entire dorsum of foot" },
+        text: "both backs of feet",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["affected area", "affected areas", "affected site", "บริเวณที่เป็น"],
@@ -545,8 +1075,66 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
       definition: { coding: { code: "26893007", display: "Inguinal region structure" }, routeHint: RouteCode["Topical route"] }
     },
     {
-      names: ["scalp"],
-      definition: { coding: { code: "41695006", display: "Scalp" }, routeHint: RouteCode["Topical route"] }
+      names: ["scalp", "หนังศีรษะ", "ที่หนังศีรษะ"],
+      definition: {
+        coding: { code: "41695006", display: "Scalp" },
+        text: "scalp",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["flank"],
+      definition: {
+        coding: { code: "58602004", display: "Flank" },
+        text: "flank",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["left flank"],
+      definition: {
+        coding: { code: "58602004", display: "Flank" },
+        text: "left flank",
+        spatialRelation: {
+          relationText: "left side",
+          relationCoding: {
+            system: SNOMED_SYSTEM,
+            code: "49370004",
+            display: "Lateral"
+          },
+          targetText: "flank",
+          targetCoding: {
+            system: SNOMED_SYSTEM,
+            code: "58602004",
+            display: "Flank"
+          },
+          sourceText: "left flank"
+        },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["right flank"],
+      definition: {
+        coding: { code: "58602004", display: "Flank" },
+        text: "right flank",
+        spatialRelation: {
+          relationText: "right side",
+          relationCoding: {
+            system: SNOMED_SYSTEM,
+            code: "49370004",
+            display: "Lateral"
+          },
+          targetText: "flank",
+          targetCoding: {
+            system: SNOMED_SYSTEM,
+            code: "58602004",
+            display: "Flank"
+          },
+          sourceText: "right flank"
+        },
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["face"],
@@ -566,7 +1154,11 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
     },
     {
       names: ["temples", "both temples", "bilateral temples"],
-      definition: { coding: { code: "362620003", display: "Entire temporal region" }, routeHint: RouteCode["Topical route"] }
+      definition: {
+        coding: { code: "362620003", display: "Entire temporal region" },
+        text: "both temples",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["left temple", "left temple region", "left temporal region"],
@@ -587,19 +1179,23 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
       }
     },
     {
-      names: ["neck"],
-      definition: { coding: { code: "45048000", display: "Neck" }, routeHint: RouteCode["Topical route"] }
+      names: ["neck", "คอ"],
+      definition: {
+        coding: { code: "45048000", display: "Neck" },
+        text: "neck",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
-      names: ["buttock", "buttocks", "gluteal", "glute"],
+      names: ["buttock", "buttocks", "gluteal", "glute", "butt", "ass"],
       definition: { coding: { code: "46862004", display: "Buttock" }, routeHint: RouteCode["Intramuscular route"] }
     },
     {
-      names: ["left buttock", "left gluteal"],
+      names: ["left buttock", "left gluteal", "left butt", "left ass"],
       definition: { coding: { code: "723979003", display: "Structure of left buttock" }, routeHint: RouteCode["Intramuscular route"] }
     },
     {
-      names: ["right buttock", "right gluteal"],
+      names: ["right buttock", "right gluteal", "right butt", "right ass"],
       definition: { coding: { code: "723980000", display: "Structure of right buttock" }, routeHint: RouteCode["Intramuscular route"] }
     },
     {
@@ -618,15 +1214,43 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: Array<{
     },
     {
       names: ["vagina", "vaginal"],
-      definition: { coding: { code: "76784001", display: "Vagina" }, routeHint: RouteCode["Per vagina"] }
+      definition: { coding: { code: "76784001", display: "Vagina" }, text: "vagina", routeHint: RouteCode["Per vagina"] }
     },
     {
       names: ["penis", "penile"],
-      definition: { coding: { code: "18911002", display: "Penis structure" }, routeHint: RouteCode["Topical route"] }
+      definition: {
+        coding: { code: "18911002", display: "Penis structure" },
+        text: "penis",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["testis", "testicle", "testicles", "อัณฑะ", "ลูกอัณฑะ"],
+      definition: {
+        coding: { code: "40689003", display: "Testis" },
+        text: "testis",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["left testis", "left testicle", "อัณฑะซ้าย", "ลูกอัณฑะซ้าย"],
+      definition: {
+        coding: { code: "63239009", display: "Left testis" },
+        text: "left testis",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["right testis", "right testicle", "อัณฑะขวา", "ลูกอัณฑะขวา"],
+      definition: {
+        coding: { code: "15598003", display: "Right testis" },
+        text: "right testis",
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["rectum", "rectal"],
-      definition: { coding: { code: "34402009", display: "Rectum" }, routeHint: RouteCode["Per rectum"] }
+      definition: { coding: { code: "34402009", display: "Rectum" }, text: "rectum", routeHint: RouteCode["Per rectum"] }
     },
     {
       names: ["anus"],
@@ -967,7 +1591,17 @@ export const TIMING_ABBREVIATIONS: Record<string, FrequencyDescriptor> = {
   am: { code: "AM", when: [EventTiming.Morning] },
   pm: { code: "PM", when: [EventTiming.Evening] },
   qam: { code: "QAM", when: [EventTiming.Morning] },
-  qpm: { code: "QPM", when: [EventTiming.Evening] }
+  qpm: { code: "QPM", when: [EventTiming.Evening] },
+  bld: {
+    code: "BLD",
+    when: [EventTiming.Meal],
+    discouraged: "BLD"
+  },
+  "b-l-d": {
+    code: "BLD",
+    when: [EventTiming.Meal],
+    discouraged: "BLD"
+  }
 };
 
 export const EVENT_TIMING_TOKENS: Record<string, EventTiming> = {
@@ -1883,7 +2517,14 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
     }
   },
   {
-    names: ["abdominal pain", "stomach pain", "stomachache"],
+    names: [
+      "abdominal pain",
+      "abdomen pain",
+      "abdomen ache",
+      "pain in abdomen",
+      "stomach pain",
+      "stomachache"
+    ],
     definition: {
       coding: { system: SNOMED_SYSTEM, code: "21522001", display: "Abdominal pain" },
       text: "Abdominal pain",
@@ -1940,7 +2581,19 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
     }
   },
   {
-    names: ["itch", "itching", "itchy", "wound itch", "itchy wound", "wound itching", "itching wound", "itching of wound"],
+    names: [
+      "itch",
+      "itching",
+      "itchiness",
+      "itchy",
+      "wound itch",
+      "wound itchiness",
+      "itchy wound",
+      "wound itching",
+      "itching wound",
+      "itching of wound",
+      "itchiness of wound"
+    ],
     definition: {
       coding: {
         system: SNOMED_SYSTEM,
@@ -1966,7 +2619,7 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
     definition: {
       coding: { system: SNOMED_SYSTEM, code: "386661006", display: "Fever" },
       text: "Fever",
-      aliases: ["ไข้", "ตัวร้อน"],
+      aliases: ["ไข้", "มีไข้", "เป็นไข้", "ตัวร้อน"],
       i18n: { th: "ไข้" }
     }
   },
@@ -2041,6 +2694,68 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
     }
   },
   {
+    names: [
+      "acne",
+      "acne vulgaris",
+      "pimple",
+      "pimples",
+      "breakout",
+      "breakouts",
+      "acne breakout",
+      "acne breakouts"
+    ],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "88616000",
+        display: "Acne vulgaris"
+      },
+      text: "Acne",
+      aliases: ["สิว"],
+      i18n: { th: "สิว" }
+    }
+  },
+  {
+    names: ["eczema", "eczema flare", "eczematous rash"],
+    definition: {
+      coding: { system: SNOMED_SYSTEM, code: "43116000", display: "Eczema" },
+      text: "Eczema",
+      aliases: ["เอ็กซีมา", "ผื่นแพ้"],
+      i18n: { th: "ผื่นแพ้" }
+    }
+  },
+  {
+    names: ["atopic dermatitis", "atopic eczema"],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "24079001",
+        display: "Atopic dermatitis"
+      },
+      text: "Atopic dermatitis",
+      aliases: ["ผื่นภูมิแพ้", "ภูมิแพ้ผิวหนัง", "แพ้ผิว", "ผิวแพ้"],
+      i18n: { th: "ผื่นภูมิแพ้" }
+    }
+  },
+  {
+    names: ["psoriasis", "psoriatic rash"],
+    definition: {
+      coding: { system: SNOMED_SYSTEM, code: "9014002", display: "Psoriasis" },
+      text: "Psoriasis",
+      aliases: ["สะเก็ดเงิน"],
+      i18n: { th: "สะเก็ดเงิน" }
+    }
+  },
+  {
+    names: ["hives", "urticaria"],
+    definition: {
+      coding: { system: SNOMED_SYSTEM, code: "126485001", display: "Urticaria" },
+      text: "Hives",
+      aliases: ["ลมพิษ", "ลมพิด"],
+      i18n: { th: "ลมพิษ" }
+    }
+  },
+  {
     names: ["rash", "skin rash", "skin eruption", "eruption of skin"],
     definition: {
       coding: {
@@ -2107,12 +2822,81 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
     }
   },
   {
+    names: [
+      "cold sore",
+      "cold sores",
+      "herpes labialis",
+      "fever blister",
+      "fever blisters"
+    ],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "1475003",
+        display: "Herpes labialis"
+      },
+      text: "Cold sores",
+      aliases: ["เริมที่ปาก", "แผลเริมที่ปาก"],
+      i18n: { th: "เริมที่ปาก" }
+    }
+  },
+  {
+    names: [
+      "mouth ulcer",
+      "mouth ulcers",
+      "oral ulcer",
+      "oral ulcers",
+      "mouth sore",
+      "mouth sores",
+      "canker sore",
+      "canker sores",
+      "aphthous ulcer",
+      "aphthous ulcers"
+    ],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "26284000",
+        display: "Ulcer of mouth"
+      },
+      text: "Mouth ulcer",
+      aliases: ["แผลในปาก", "ร้อนใน"],
+      i18n: { th: "แผลในปาก" }
+    }
+  },
+  {
     names: ["dry skin", "xeroderma"],
     definition: {
       coding: { system: SNOMED_SYSTEM, code: "52475004", display: "Xeroderma" },
       text: "Dry skin",
       aliases: ["ผิวแห้ง"],
       i18n: { th: "ผิวแห้ง" }
+    }
+  },
+  {
+    names: ["dandruff", "scalp dandruff"],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "400201008",
+        display: "Pityriasis capitis"
+      },
+      text: "Dandruff",
+      aliases: ["รังแค"],
+      i18n: { th: "รังแค" }
+    }
+  },
+  {
+    names: ["scalp itch", "scalp itchiness", "scalp itching", "itchiness of scalp", "itching of scalp", "itchy scalp"],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "275921007",
+        display: "Scalp itchy"
+      },
+      text: "Scalp itching",
+      aliases: ["คันหนังศีรษะ"],
+      i18n: { th: "คันหนังศีรษะ" }
     }
   },
   {
@@ -2148,6 +2932,15 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
       text: "Urinary urgency",
       aliases: ["ปวดปัสสาวะรีบ", "ปวดปัสสาวะกะทันหัน"],
       i18n: { th: "ปวดปัสสาวะรีบ" }
+    }
+  },
+  {
+    names: ["hemorrhoids", "haemorrhoids", "hemorrhoid", "haemorrhoid", "piles"],
+    definition: {
+      coding: { system: SNOMED_SYSTEM, code: "70153002", display: "Hemorrhoids" },
+      text: "Hemorrhoids",
+      aliases: ["ริดสีดวง", "ริดสีดวงทวาร"],
+      i18n: { th: "ริดสีดวง" }
     }
   },
   {
@@ -2187,6 +2980,19 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
       text: "Vaginal itching",
       aliases: ["คันช่องคลอด"],
       i18n: { th: "คันช่องคลอด" }
+    }
+  },
+  {
+    names: ["vaginal dryness", "dry vagina"],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "31908003",
+        display: "Vaginal dryness"
+      },
+      text: "Vaginal dryness",
+      aliases: ["ช่องคลอดแห้ง"],
+      i18n: { th: "ช่องคลอดแห้ง" }
     }
   },
   {
@@ -2306,6 +3112,28 @@ const DEFAULT_PRN_REASON_SOURCE: Array<{
       text: "Poor concentration",
       aliases: ["สมาธิไม่ดี", "ขาดสมาธิ", "ไม่มีสมาธิ"],
       i18n: { th: "สมาธิไม่ดี" }
+    }
+  },
+  {
+    names: ["motion sickness", "travel sickness", "car sickness", "sea sickness", "seasickness"],
+    definition: {
+      coding: {
+        system: SNOMED_SYSTEM,
+        code: "37031009",
+        display: "Motion sickness"
+      },
+      text: "Motion sickness",
+      aliases: ["เมารถ", "เมาเรือ", "เมาเครื่องบิน"],
+      i18n: { th: "เมารถหรือเมาเรือ" }
+    }
+  },
+  {
+    names: ["dry mouth", "xerostomia"],
+    definition: {
+      coding: { system: SNOMED_SYSTEM, code: "162014002", display: "Dry mouth" },
+      text: "Dry mouth",
+      aliases: ["ปากแห้ง"],
+      i18n: { th: "ปากแห้ง" }
     }
   },
   {

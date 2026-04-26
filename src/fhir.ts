@@ -2,7 +2,15 @@ import {
   buildAdditionalInstructionFramesFromCoding,
   findAdditionalInstructionDefinitionByCoding
 } from "./advice";
-import { clonePrimitiveElement } from "./fhir-translations";
+import {
+  buildBodySiteSpatialRelationExtensions,
+  parseBodySiteSpatialRelationExtension
+} from "./body-site-spatial";
+import {
+  buildBodySiteTopographicalModifierCoding,
+  getBodySiteText
+} from "./body-site-lookup";
+import { cloneExtensions, clonePrimitiveElement } from "./fhir-translations";
 import { formatCanonicalClause } from "./format";
 import { ParserState } from "./parser-state";
 import { joinCanonicalPrnReasonTexts } from "./prn";
@@ -31,6 +39,15 @@ import { arrayIncludes } from "./utils/array";
 const SNOMED_SYSTEM = "http://snomed.info/sct";
 const UCUM_SYSTEM = "http://unitsofmeasure.org";
 type CodeableConceptCoding = NonNullable<FhirCodeableConcept["coding"]>[number];
+
+export interface FhirProjectionOptions {
+  /**
+   * Defaults to true. When true, structured spatial body-site phrases such as
+   * "top of head" can emit a SNOMED topographical modifier expression in
+   * Dosage.site.coding while preserving the spatial-relation extension.
+   */
+  bodySitePostcoordination?: boolean;
+}
 
 function createEmptyCanonicalClause(rawText: string): CanonicalSigClause {
   return {
@@ -71,6 +88,40 @@ function selectPreferredSiteCoding(site: FhirCodeableConcept | undefined): Codea
     }
   }
   return selectFirstCodingWithCode(site);
+}
+
+type CanonicalSite = NonNullable<CanonicalSigClause["site"]>;
+
+function selectCanonicalSiteCoding(
+  site: CanonicalSite | undefined,
+  options?: FhirProjectionOptions
+): CanonicalSite["coding"] | undefined {
+  if (options?.bodySitePostcoordination === false) {
+    return site?.coding;
+  }
+  const postcoordinated = buildBodySiteTopographicalModifierCoding(
+    site?.spatialRelation,
+    site?.text,
+    { postcoordination: true }
+  );
+  return options?.bodySitePostcoordination === true
+    ? postcoordinated ?? site?.coding
+    : site?.coding ?? postcoordinated;
+}
+
+function buildSiteCodingArray(
+  siteCoding: CanonicalSite["coding"] | undefined
+): CodeableConceptCoding[] | undefined {
+  if (!siteCoding?.code) {
+    return undefined;
+  }
+  return [
+    {
+      system: siteCoding.system ?? SNOMED_SYSTEM,
+      code: siteCoding.code,
+      display: siteCoding.display
+    }
+  ];
 }
 
 function buildFhirDoseRange(range: CanonicalDoseRange, unit: string | undefined): FhirRange | undefined {
@@ -269,7 +320,8 @@ function appendWarning(warnings: string[] | undefined, warning: string | undefin
 
 export function canonicalToFhir(
   clause: CanonicalSigClause,
-  textOverride?: string
+  textOverride?: string,
+  options?: FhirProjectionOptions
 ): FhirDosage {
   const dosage: FhirDosage = {};
   const repeat: FhirTimingRepeat = {};
@@ -375,19 +427,12 @@ export function canonicalToFhir(
     }
   }
 
-  if (clause.site?.text || clause.site?.coding?.code) {
-    const coding = clause.site?.coding?.code
-      ? [
-        {
-          system: clause.site.coding.system ?? SNOMED_SYSTEM,
-          code: clause.site.coding.code,
-          display: clause.site.coding.display
-        }
-      ]
-      : undefined;
+  if (clause.site?.text || clause.site?.coding?.code || clause.site?.spatialRelation) {
+    const siteCoding = selectCanonicalSiteCoding(clause.site, options);
     dosage.site = {
       text: clause.site?.text,
-      coding
+      coding: buildSiteCodingArray(siteCoding),
+      extension: buildBodySiteSpatialRelationExtensions(clause.site?.spatialRelation)
     };
   }
 
@@ -441,10 +486,12 @@ export function canonicalToFhir(
             {
               system: reason.coding.system ?? SNOMED_SYSTEM,
               code: reason.coding.code,
-              display: reason.coding.display
+              display: reason.coding.display,
+              extension: cloneExtensions(reason.coding.extension)
             }
           ];
         }
+        concept.extension = buildBodySiteSpatialRelationExtensions(reason.spatialRelation);
         dosage.asNeededFor.push(concept);
       }
     }
@@ -484,9 +531,20 @@ export function canonicalFromFhir(dosage: FhirDosage): CanonicalSigClause {
   }
 
   const siteCoding = selectPreferredSiteCoding(dosage.site);
-  if (dosage.site?.text || siteCoding?.code) {
+  const siteSpatialRelation = parseBodySiteSpatialRelationExtension(dosage.site);
+  const siteText = dosage.site?.text ?? (
+    siteCoding?.code
+      ? getBodySiteText({
+        system: siteCoding.system,
+        code: siteCoding.code,
+        display: siteCoding.display
+      })
+      : undefined
+  );
+  if (siteText || siteCoding?.code || siteSpatialRelation) {
     clause.site = {
-      text: dosage.site?.text,
+      text: siteText,
+      spatialRelation: siteSpatialRelation,
       coding: siteCoding?.code
         ? {
           code: siteCoding.code,
@@ -570,11 +628,13 @@ export function canonicalFromFhir(dosage: FhirDosage): CanonicalSigClause {
       const coding = concept.coding?.find((code) => Boolean(code.code));
       return {
         text: concept.text,
+        spatialRelation: parseBodySiteSpatialRelationExtension(concept),
         coding: coding?.code
           ? {
             code: coding.code,
             display: coding.display,
-            system: coding.system
+            system: coding.system,
+            extension: cloneExtensions(coding.extension)
           }
           : undefined
       };
@@ -643,7 +703,17 @@ export function parserStateFromFhir(dosage: FhirDosage): ParserState {
   state.periodMax = dosage.timing?.repeat?.periodMax;
   state.periodUnit = dosage.timing?.repeat?.periodUnit;
   state.routeText = dosage.route?.text;
-  state.siteText = dosage.site?.text;
+  const siteCoding = selectPreferredSiteCoding(dosage.site);
+  state.siteText = dosage.site?.text ?? (
+    siteCoding?.code
+      ? getBodySiteText({
+        system: siteCoding.system,
+        code: siteCoding.code,
+        display: siteCoding.display
+      })
+      : undefined
+  );
+  state.siteSpatialRelation = parseBodySiteSpatialRelationExtension(dosage.site);
   state.methodText = dosage.method?.text;
   state.methodTextElement = clonePrimitiveElement(dosage.method?._text);
   state.patientInstruction = dosage.patientInstruction;
@@ -653,11 +723,13 @@ export function parserStateFromFhir(dosage: FhirDosage): ParserState {
       const coding = selectFirstCodingWithCode(concept);
       return {
         text: concept.text,
+        spatialRelation: parseBodySiteSpatialRelationExtension(concept),
         coding: coding?.code
           ? {
             code: coding.code,
             display: coding.display,
             system: coding.system,
+            extension: cloneExtensions(coding.extension),
             _display: clonePrimitiveElement(coding._display)
           }
           : undefined
@@ -690,7 +762,6 @@ export function parserStateFromFhir(dosage: FhirDosage): ParserState {
     }
   }
 
-  const siteCoding = selectPreferredSiteCoding(dosage.site);
   if (siteCoding?.code) {
     state.siteCoding = {
       code: siteCoding.code,

@@ -1441,3 +1441,711 @@ Locked with parser regressions for:
 - `1 tab po once every 6 hours`
 - `1 tab po one time every 8 hours`
 - `1 tab po once q week`
+
+## 2026-04-25 Topical `at <site>` overlap fixed at grammar level
+
+Main-branch bug:
+- `apply before bed at lesion`
+- `apply twice daily at wound`
+
+were parsing the timing correctly but dropping the trailing site because `at`
+was being consumed by the generic schedule-anchor production before site
+resolution could claim it.
+
+Bad attempted shape:
+- hardcoded guard logic in the generic-anchor matcher to make it back off for
+  specific topical-site tails
+
+Actual fix:
+- added an explicit `site.anchorPhrase` grammar production for overlapping
+  anchor tokens (`at` / `on` / `with`)
+- placed that production ahead of `schedule.genericAnchor`
+- kept the broader grammar order unchanged
+
+Why this is cleaner:
+- the overlap is real lexical ambiguity between two productions
+- the fix belongs in production precedence, not in a literal lesion/wound check
+
+Verified outputs:
+- `apply before bed at lesion` -> `Apply the medication at bedtime to the lesion.`
+- `apply twice daily at wound` -> `Apply the medication twice daily to the wound.`
+
+Regression check:
+- narrower overlap handling does not regress nearby cases like:
+  - `1 drop to OS OD`
+  - `apply moisturizer to face every morning`
+  - `1 drop to OS q1/4h x4`
+
+## 2026-04-26 PRN ambulatory reason coverage expanded in terminology layer
+
+User-facing gaps:
+- `PRN acne`
+- anatomy-normalized variants like `abdomen pain`
+- several common ambulatory topical / GU / travel reasons were still missing
+
+Fix shape:
+- expanded `DEFAULT_PRN_REASON_SOURCE` rather than adding parser-side special
+  cases
+- kept the solution in the coded terminology dictionary where it belongs
+
+Added coded PRN coverage:
+- acne
+- eczema / atopic dermatitis
+- psoriasis
+- hives / urticaria
+- cold sore / herpes labialis
+- mouth ulcer / aphthous ulcer / canker sore
+- dandruff
+- scalp itching
+- hemorrhoids
+- vaginal dryness
+- motion sickness
+- dry mouth
+
+Alias normalization tightened:
+- `abdomen pain` now maps to the existing abdominal-pain concept instead of
+  missing just because the adjective/noun form changed
+
+Locked with parser regressions for:
+- `apply prn acne`
+- `apply prn hives`
+- `insert 1 supp pr prn hemorrhoids`
+- `1 tab po prn motion sickness`
+- `apply prn mouth ulcer`
+- `1 tab po prn abdomen pain`
+- Thai aliases like `สิว` and `เมารถ`
+
+## 2026-04-26 PRN `symptom at site` now keeps full text and prefers exact combined concepts
+
+Problem shape:
+- phrases like `ulcer at mouth` and `pain at abdomen` were grammatically a
+  head symptom plus a locative complement
+- the old behavior either missed the exact combined concept or collapsed back
+  to the generic symptom coding only
+
+Actual fix:
+- kept the original PRN text intact for FHIR `asNeededFor.text`
+- when PRN parsing sees a trailing locative site phrase, it now derives a
+  combined canonical from the parsed structure (`site + symptom-head`) before
+  falling back to the bare symptom head
+- this stays in the PRN grammar/analysis layer, not in ad hoc lookup hacks
+
+Result:
+- `ulcer at mouth` now resolves through the same mouth-ulcer concept as
+  `mouth ulcer`
+- `pain at abdomen` resolves through the abdominal-pain concept
+- generic locative forms like `pain at hands` / `pain at buttock` /
+  `pain at anus` keep the full phrase text across parse -> FHIR -> round-trip,
+  while still using the generic `Pain` code when no exact combined concept is
+  available
+
+## 2026-04-26 Generic `PRN symptom at site` now falls back to SNOMED postcoordination
+
+The user was right to push here: once the parser has already recognized a PRN
+head symptom plus a locative site complement, stopping at a generic symptom
+code is underspecified.
+
+New fallback:
+- if there is no exact pre-coordinated concept for the combined meaning
+- and the symptom head plus site both have SNOMED concepts
+- emit a compositional grammar expression using `363698007 | Finding site |`
+
+Examples:
+- `pain at hands` -> `22253000:363698007=85562004`
+- `pain at buttock` -> `22253000:363698007=46862004`
+- `pain at anus` -> `22253000:363698007=181262009`
+- `irritation at rectum` -> `257553007:363698007=34402009`
+- `irritation at vagina` -> `257553007:363698007=76784001`
+
+Still preserved:
+- the original phrase remains in `asNeededFor.text`
+- exact pre-coordinated concepts still win over postcoordination when available
+
+## 2026-04-26 Site normalization for interior/surface anatomy phrases
+
+The parser was still leaving several common topical/otic site phrases as raw
+text, which made the long text sound machine-generated and also blocked more
+specific site coding for PRN symptom-at-site phrases.
+
+Fixed with terminology-backed normalization instead of formatter-only hacks:
+- `inside ear` now normalizes to the coded `ear` site
+- `inside ear canal` now normalizes to coded `ear canal`
+- common proper surface/body sub-sites are now bundled too:
+  - `back of hand` / `both backs of hands`
+  - `palm` / `both palms`
+  - `sole of foot` / `both soles`
+  - `heel` / `left heel` / `right heel` / `both heels`
+  - `back of foot` / `dorsum of foot`
+  - `back of head`
+- generic itchiness aliases were widened so `itchiness` can participate in the
+  existing PRN `symptom + site` grammar and SNOMED postcoordination fallback
+
+Formatting cleanup paired with that:
+- `Apply the medication to the inside ear canal.` -> `Apply the medication in
+  the ear canal.`
+- `Apply the medication to the inside ear.` -> `Apply the medication in the
+  ear.`
+- unresolved locative site phrases now realize more naturally too:
+  - `behind left ear` -> `behind the left ear`
+  - `top of head` -> `to the top of the head`
+
+## 2026-04-26 Body-site feature grammar foundation
+
+The old weak point was that anatomical/site handling still lived in three
+different places:
+- parser normalization
+- PRN symptom-at-site coding
+- formatter English realization
+
+That kept producing the same pathology over and over: one path knew the site
+structure, another only saw a flattened string, and a third had late regex
+cleanup bolted on top.
+
+This is now moved onto one shared body-site grammar module:
+- `src/body-site-grammar.ts`
+
+It is not a full HPSG parser for the whole sig language yet, but it is an
+HPSG-ish typed feature-structure slice for site NPs and locative complements:
+- nominal sites
+- partitives like `back of hand`, `sole of foot`
+- locatives like `behind left ear`
+
+Shared consequences:
+- parser site lookup keeps two identities separate:
+  - lookup identity for code resolution / custom maps
+  - semantic display identity for canonical meaning / realization
+- PRN `symptom at site` fallback now reuses the same site analysis
+- English site realization no longer relies on the new regex glue that had been
+  added in `src/format.ts`
+- custom `siteCodeMap` behavior still works because lookup canonical and display
+  canonical are no longer conflated
+
+This is the right shape for the larger rewrite too:
+- whole-parser migration should generalize this pattern to other clause
+  constituents
+- dose / schedule / route / method / PRN should become typed feature
+  structures with unification-like compatibility rules
+- then the central parser can stop depending so heavily on ordered collector
+  passes
+
+Also fixed along the way:
+- exact abdomen/temple surface forms are stabilized (`abdomen`, `both temples`)
+- otic English realization no longer falls back to `via otic`; it now formats
+  as `Instill ... in the right ear.`
+
+## 2026-04-26 HPSG implementation reference added
+
+Added:
+- `HPSG_IMPLEMENTATION_GUIDE.md`
+
+Purpose:
+- give this repo a concrete, implementation-oriented HPSG reference instead of
+  relying on memory or vague theory talk
+- define whole-parser migration rules:
+  - typed feature structures first
+  - lexical/construction separation
+  - contribution/unification style parser core
+  - no new semantic formatter hacks
+  - no conflating lookup form, canonical meaning, and realization
+
+Research basis used for the note:
+- DELPH-IN formalism and grammar docs
+- Grammar Matrix docs
+- DELPH-IN grammar scale-up discussion
+- HPSG handbook / HPSG synopsis material
+
+## 2026-04-26 Parser-core contribution layer: first whole-parser slice
+
+Started the real parser-core migration away from direct collector mutation.
+
+Added:
+- `src/clause-features.ts`
+
+This is the first shared typed contribution layer for clause semantics:
+- `method`
+- `route`
+- `site`
+- `schedule`
+- warnings
+- consumed token indices
+
+Parser core changes in `src/parser.ts`:
+- added contribution compatibility checks:
+  - `canApplyScheduleContribution(...)`
+  - `canApplyClauseContribution(...)`
+- added contribution application:
+  - `applyScheduleContribution(...)`
+  - `applyClauseContribution(...)`
+- added feature-terminal dispatch:
+  - `applyGrammarFeatureTerminal(...)`
+- added descriptor-to-schedule contribution helper:
+  - `buildScheduleContributionFromDescriptor(...)`
+
+Migrated first-wave low-risk terminals from direct mutation to typed
+contributions:
+- schedule:
+  - `schedule.bldMeal`
+  - `schedule.odTimingAbbreviation`
+  - `schedule.timingAbbreviation`
+  - `schedule.eventTiming`
+  - `schedule.dayOfWeek`
+  - `schedule.phraseWordFrequency`
+  - `schedule.wordFrequency`
+- method:
+  - `method.verb`
+- site:
+  - `site.abbreviation`
+- count:
+  - `count.singleOccurrence`
+
+Why these first:
+- they map cleanly to independent typed schedule/method/site/count
+  contributions
+- they do not depend on the more entangled interval/count-limit parsers
+- they let the parser start behaving like contribution + compatibility merge
+  instead of pure mutation order, without destabilizing the harder cadence
+  machinery in the same change
+
+Important regression caught/fixed while doing this:
+- ophthalmic side abbreviations like `OS` were initially blocked because the
+  new site-abbreviation contribution was also trying to force a route
+- fixed by matching the old semantics exactly:
+  - contribution route only when `state.routeCode` is not already set
+- same fix applied to method-verb route contributions
+
+This is not yet full HPSG/unification for the whole parser, but it is the
+first actual whole-parser center-of-gravity move:
+- collectors can now emit typed semantic contributions
+- parser core can accept/reject them by compatibility instead of only mutation
+  sequencing
+- the next slices should migrate the harder terminals:
+  - explicit site phrases
+  - route synonyms
+  - numeric/separated/compact cadence
+  - count limits
+  - dose structures
+
+## 2026-04-26 Parser-core contribution layer: second family migration
+
+Pushed a bigger parser-core family migration instead of another isolated
+terminal patch.
+
+Moved these clause-grammar families onto typed contributions in `src/parser.ts`:
+- route:
+  - `route.synonym`
+- site:
+  - `site.anchorPhrase` (explicit site phrases)
+- schedule/count/duration:
+  - `count.limit`
+  - `schedule.duration`
+  - `dose.countBasedFrequency`
+
+This matters because these are not tiny leaf cases:
+- route/site phrase resolution is a major ambiguity center
+- finite count/duration/cadence structure is one of the main schedule families
+- count-based frequency (`once daily`, `3 times per day`, `one time weekly`)
+  was still sitting on the old mutation path
+
+Important architectural changes:
+- added route refinement semantics instead of treating all route differences as
+  flat conflicts
+- parser now recognizes that:
+  - `Topical -> Per vagina / Per rectum / Ophthalmic / Otic / Nasal`
+  - `Oral -> Buccal / Sublingual`
+  - `Ophthalmic -> Ocular / Intravitreal`
+  are compatible lexical-semantic refinements, not contradictions
+- explicit site-phrase contributions can now carry:
+  - consumed tokens
+  - site token indices
+  - site lookup request
+  - route upgrades inferred from site semantics
+
+This fixed a real regression uncovered by the rewrite:
+- `apply cream to vagina once daily`
+- `apply vaginal cream nightly`
+had started collapsing back to generic topical route because the new
+contribution compatibility layer treated `Topical` vs `Per vagina` as a hard
+conflict
+- that is now modeled correctly as refinement
+
+Net effect:
+- a whole lexical family is now off the old mutation-only path in core clause
+  parsing
+- route/site/cadence/count/duration now participate in typed compatibility
+  checks instead of only collector ordering
+- the remaining old center is more clearly concentrated in:
+  - separated/compact/numeric interval cadence
+  - explicit route/default reconciliation
+  - dose/unit structure
+  - some post-parse cleanup passes
+
+## 2026-04-26 Clause sign inventory and candidate selection
+
+Addressed the biggest remaining “cheating” point in the parser core:
+- even after contribution migration, `parseCoreTerm(...)` was still choosing
+  rule families by hardcoded control flow:
+  - `parseScheduleTerm -> parseMethodTerm -> parseRouteTerm -> ...`
+
+That is no longer the core dispatch model.
+
+Added:
+- `ParserState.clone()` in `src/parser-state.ts`
+
+Parser-core changes in `src/parser.ts`:
+- added a declarative `CLAUSE_GRAMMAR_RULES` inventory
+- added preview for both:
+  - feature rules
+  - imperative legacy rules
+- rule preview now uses cloned parser state for imperative rules, so candidate
+  evaluation does not mutate the live state
+- added candidate ranking based on:
+  - longest span
+  - consumed-token coverage
+  - grammar precedence
+  - feature/state delta richness
+- `parseCoreTerm(...)` now selects the best compatible clause sign candidate
+  from the inventory instead of calling category parsers in fixed order
+
+Important consequences:
+- rule choice is no longer identical to parser control-flow order
+- explicit verb heads can now outrank weaker route inferences on the same token
+- lexical refinements like `Topical -> Per vagina` are modeled as compatible
+  route refinement, not hard conflict
+
+Real regression uncovered/fixed while doing this:
+- `po 10 ml twice daily, drink slowly`
+  initially regressed because the candidate scorer preferred a route-like
+  analysis of `drink` over the explicit method-verb analysis
+- fixed by making grammar precedence outrank raw feature-count after
+  span/coverage, which is closer to actual headed lexical analysis
+
+This is materially closer to an HPSG-style parser center because:
+- rule inventory is declarative
+- candidate evaluation is separate from commitment
+- compatibility is feature-based
+- live state mutation happens only after candidate selection
+
+Still not “full HPSG” yet:
+- no full chart / parse forest
+- no true branching ambiguity retention beyond best-candidate commitment
+- many higher-order construction families are still implemented by legacy
+  procedural matchers
+
+But the center is no longer just a deterministic term-order walker.
+
+## 2026-04-26 Active clause inventory is now feature-only
+
+Pushed the parser center one step further:
+- the active `CLAUSE_GRAMMAR_RULES` inventory is now feature-only
+
+What changed:
+- introduced `ClauseDoseContribution` in `src/clause-features.ts`
+- extended clause contribution application/compatibility to include:
+  - dose value
+  - dose range
+  - unit
+- added `buildContributionFromStateDelta(...)`
+- added `liftImperativeMatcherToContribution(...)`
+
+Meaning:
+- the remaining legacy procedural builders can still exist internally
+- but they are no longer active parser-center rules in their raw imperative
+  form
+- they are lifted into typed clause contributions before the sign inventory sees
+  them
+
+This also fixed an important bug in the contribution layer:
+- schedule-only PRN probes parse subarrays of tokens
+- contribution application was incorrectly assuming `token.index === current
+  array position`
+- that broke cases like:
+  - `1 tab po prn q4-6hr for pain`
+- fixed by resolving consumed token identities by token index, not array slot
+
+Architectural consequence:
+- the active clause parser now chooses among typed sign contributions only
+- legacy matcher procedures are reduced to lower-level construction helpers
+  rather than being the active grammar formalism themselves
+
+Still not complete:
+- contribution generation for some families is still obtained by lifting state
+  deltas from legacy procedures instead of being born directly from fully
+  declarative lexical/construction constraints
+- that is the next cleanup target if this continues
+
+## 2026-04-26 Removed lifted state-delta rules from the active clause grammar
+
+This is the cleanup the HPSG guide demanded.
+
+What changed:
+- removed the active parser-center dependence on:
+  - `ParserState.clone()`
+  - `buildContributionFromStateDelta(...)`
+  - `liftImperativeMatcherToContribution(...)`
+  - imperative preview/ranking branches
+- removed the dead unused `parseScheduleTerm()` / `parseDoseTerm()`-style
+  wrapper path that still referenced imperative terminals
+- simplified `ClauseGrammarRule` so the active sign inventory is native
+  contribution rules only
+- replaced the remaining lifted active families with direct contribution
+  constructors for:
+  - separated interval cadence
+  - time-based schedule
+  - numeric cadence
+  - compact `q...` interval cadence
+  - multiplicative cadence
+  - combo event timings
+  - meal-anchor sequences
+  - custom `when`
+  - day ranges
+  - dose range / numeric dose / times-dose
+  - timing/generic connectors and anchors
+
+Meaning:
+- the active parser center no longer previews mutated legacy state to infer
+  clause features
+- active clause analysis now selects among native typed contributions directly
+- remaining old imperative helpers may still exist as lower-level support or
+  inactive compatibility code, but they are no longer the active grammar
+  formalism used by `parseCoreTerm()`
+
+Verification:
+- `npm run build`
+- `npm test`
+- 566 tests passing
+
+## 2026-04-26 HPSG core substrate is live, but full parser deletion is not done
+
+The latest work moved the live clause terminal path onto typed HPSG signs:
+
+- added [src/hpsg/signature.ts](src/hpsg/signature.ts)
+- added [src/hpsg/unification.ts](src/hpsg/unification.ts)
+- added [src/hpsg/projection.ts](src/hpsg/projection.ts)
+- added [src/hpsg/chart.ts](src/hpsg/chart.ts)
+- added [src/hpsg/terminal-adapter.ts](src/hpsg/terminal-adapter.ts)
+- added [src/hpsg/method-lexicon.ts](src/hpsg/method-lexicon.ts)
+
+What is now true:
+
+- clause terminals are converted into typed signs before they can affect
+  parser state
+- compatibility now goes through feature-structure unification, including
+  route refinement, site identity, dose identity, and schedule identity
+- state mutation is centralized through HPSG sign projection
+- the old direct `apply*Contribution` / `canApply*Contribution` procedural path
+  was deleted from `clause-grammar-engine.ts`
+- the active rule executor now uses an agenda over licensed signs instead of a
+  single direct left-to-right mutation loop
+- count/cadence ambiguity is constrained structurally:
+  `once every 6 hours`, `one time every 8 hours`, and `once q week` now consume
+  the frequency marker as part of the cadence construction with no leftover text
+
+What is still not done:
+
+- `parser.ts` still contains the legacy `collect*Contribution` terminal
+  inventory
+- the HPSG chart parser exists and runs in shadow mode, but is not yet the sole
+  clause parser
+- PRN reason grammar and additional-instruction grammar are still separate
+  token-segment grammars rather than unified HPSG sign families
+- the remaining deletion target is to replace each `collect*Contribution`
+  family with real HPSG lexical entries and phrase constructions, then remove
+  the adapter layer
+
+Live replacement attempt:
+
+- direct projection from the new chart parser was attempted and intentionally
+  rolled back to shadow mode after it produced broad regressions
+- the regressions were not random; they identified missing HPSG construction
+  families:
+  - dose-times-frequency constructions such as `1.5 x3`
+  - one-time schedule constructions such as bare `once`
+  - time-of-day list constructions such as `at 9:00, 22:00`
+  - route display phrase spans across all SNOMED route synonyms
+  - site/probe constructions including `{mole scalp}` range handling
+  - coordinated day/weekend constructions
+  - product-form method constructions such as `use shampoo`
+- conclusion: projecting the new chart before these families are complete would
+  be fake HPSG and worse than the existing behavior
+
+Current measured footprint:
+
+- `src/parser.ts`: 7193 lines
+- `src/clause-grammar-engine.ts`: 268 lines
+- `src/hpsg/*.ts`: 1871 lines
+
+Real-world probes checked in this pass:
+
+- `apply before bed at lesion`
+- `apply twice daily at wound`
+- `po 10 ml twice daily, drink slowly`
+- `drink 10 ml twice daily, empty stomach`
+- `take 10 ml prn dizziness, can cause drowsiness`
+- `take 1 tab po prn pain, do not take with alcohol`
+- `apply to head prn itchy head`
+- `apply to back of hand prn itchiness`
+- `apply inside ear canal`
+- `apply inside ear`
+- `1 tab po once every 6 hours`
+- `insert 1 tab pv once after menstruation ends`
+
+Known probe weakness:
+
+- `apply to skin twice daily morning and evening, only at affected areas`
+  currently chooses `affected area` as the final site and leaves `to skin , only`
+  as leftover. The semantic target should be represented as body site `skin`
+  plus a restriction/precondition like "only affected areas" rather than
+  overwriting the site.
+
+Verification:
+
+- `npm run build`
+- `npm test`
+- 566 tests passing
+
+## 2026-04-26 Replaced PRN/advice tail cutoffs with token-segment tail grammar
+
+The user was correct that these functions were not grammar:
+- `findPrnReasonSeparator(...)`
+- `determinePrnReasonCutoff(...)`
+- `findStructuredPrnReasonCommaSeparator(...)`
+- `hasLeadingModalAdditionalInstruction(...)`
+- `hasInstructionSeparatorBeforeRange(...)`
+
+They were post-hoc placement heuristics over raw strings.
+
+What changed:
+- added [src/clause-tail-grammar.ts](src/clause-tail-grammar.ts)
+- PRN tail splitting now uses token segments plus structured-instruction
+  detection instead of character-offset separator hunting
+- additional-instruction collection now parses token segments rather than one
+  big raw-text group with ad hoc separator checks
+
+Meaning:
+- PRN reason vs instruction/warning tail boundaries now come from token
+  segmentation and typed instruction parsing, not substring cutoffs
+- this is still not the final HPSG shape, but it removes one of the most
+  obviously non-grammar procedural blocks from the live parser path
+
+Measured footprint after this cut:
+- `src/parser.ts`: 7205 lines
+- `src/clause-tail-grammar.ts`: 193 lines
+- `src/clause-grammar-engine.ts`: 429 lines
+- `src/clause-timing-lexicon.ts`: 283 lines
+
+Verification:
+- `npm run build`
+- `npm test`
+- 566 tests passing
+
+## 2026-04-26 Pulled the live clause engine and timing lexicon out of parser.ts
+
+The user complaint was correct: even with typed contributions, leaving the
+active engine and lexical timing inventory embedded inside `parser.ts` still
+was not an HPSG-shaped implementation.
+
+What changed:
+- moved live clause rule application / candidate preview / compatibility /
+  application into [src/clause-grammar-engine.ts](src/clause-grammar-engine.ts)
+- rewired `parseCoreTerm()` so `parser.ts` no longer owns the live candidate
+  loop
+- moved interval/count/frequency lexical inventory and schedule normalization
+  helpers into [src/clause-timing-lexicon.ts](src/clause-timing-lexicon.ts)
+  including:
+  - interval lead tokens
+  - count/frequency lexical sets
+  - period normalization
+  - duration/count normalization
+  - interval/frequency unit mapping
+
+Meaning:
+- `parser.ts` is still too large, but less of its size is now active grammar
+  engine or lexical timing inventory
+- the center is now split into:
+  - parser orchestration
+  - clause grammar engine
+  - timing/count lexicon + normalization
+- this is closer to the HPSG requirement that lexicon, constraints, and parser
+  control not collapse into one file
+
+Current measured footprint after this extraction:
+- `src/parser.ts`: 7378 lines
+- `src/clause-grammar-engine.ts`: 429 lines
+- `src/clause-timing-lexicon.ts`: 283 lines
+
+Verification:
+- `npm run build`
+- `npm test`
+- 566 tests passing
+
+## 2026-04-26 Removed the legacy clause parser path
+
+The active parser entrypoint has now been cut over to an HPSG-only shape.
+
+What changed:
+- replaced the 7k-line `src/parser.ts` body with a 395-line orchestration layer
+  that only tokenizes, invokes the HPSG chart parser, and finalizes canonical
+  output
+- deleted the old ordered agenda/collector layer:
+  - `src/clause-grammar-engine.ts`
+  - `src/clause-features.ts`
+  - `src/segment.ts`
+  - `src/hpsg/terminal-adapter.ts`
+- moved timing lexical features under `src/hpsg/timing-lexicon.ts`
+- moved multi-clause segmentation under `src/hpsg/segmenter.ts`
+- added typed HPSG PRN feature support so PRN reason scope and locative site
+  information live in the sign structure instead of being only a post-parse
+  string tail
+- scrubbed parser-facing references to the old contribution/collector/legacy
+  vocabulary
+
+Current measured footprint:
+- `src/parser.ts`: 395 lines
+- `src/hpsg/*.ts`: 2247 lines
+- deleted old clause agenda files: 512 lines removed
+
+Important caveat:
+- this is the HPSG shape cutover, not restored behavior parity
+- rule coverage is now intentionally incomplete until each old supported
+  phenomenon is rebuilt as HPSG lexical entries/constructions
+- `npm test` was deliberately not used as the target during this step because
+  the user explicitly asked to fix shape first, behavior parity second
+
+Verification:
+- `npm run build`
+
+## 2026-04-26 PRN coordination moved into HPSG sign structure
+
+The PRN weak point after the HPSG cutover was that a PRN sign still projected a
+single lookup request. That meant coordinated reasons and located symptoms could
+collapse to one generic reason or leave comma-separated reasons as leftovers.
+
+What changed:
+- widened `HpsgPrnFeature` so it can carry multiple reason signs and multiple
+  lookup requests
+- added a token-level PRN reason grammar for:
+  - coordinated reasons: `pain or fever`, `pain, fever`, `pain/fever`
+  - located symptoms: `pain at hand`, `itch at foot`
+  - coordinated located symptoms: `pain at hand or itch at foot`
+  - ellipsis over shared symptom heads: `pain at hands or feet`
+  - adjectival located symptoms: `itchy head`
+- changed PRN resolution to code each HPSG reason request separately into
+  `asNeededFor[]`
+- preserved SNOMED postcoordination per reason when the symptom and body site
+  both have codes
+- made `/` a clause boundary only when it introduces a likely new clause,
+  otherwise it can act as a PRN coordinator
+
+Checked smoke cases:
+- `1 tab po prn pain, fever` -> two coded `asNeededFor` entries
+- `1 tab po prn pain/fever` -> two coded `asNeededFor` entries
+- `apply prn pain at hands or itch at feet` -> two postcoordinated coded
+  `asNeededFor` entries
+- `apply prn pain at hands or feet` -> two postcoordinated coded entries using
+  the shared `pain` head
+- `apply to head prn itchy head` -> postcoordinated itch-at-head reason
+- `take prn dizziness, can cause drowsiness` still stops PRN before the
+  instruction tail instead of swallowing it as a reason
+
+Verification:
+- `npm run build`

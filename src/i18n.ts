@@ -1,4 +1,5 @@
 import { findAdditionalInstructionDefinitionByCoding } from "./advice";
+import { resolveBodySitePhrase } from "./body-site-grammar";
 import { getPrimitiveTranslation } from "./fhir-translations";
 import {
   DEFAULT_BODY_SITE_SNOMED_SOURCE,
@@ -9,7 +10,9 @@ import { getPreferredCanonicalPrnReasonText } from "./prn";
 import {
   AdviceArgumentRole,
   AdviceRelation,
+  BodySiteSpatialRelation,
   CanonicalDoseExpr,
+  CanonicalPrnReasonExpr,
   CanonicalScheduleExpr,
   CanonicalSigClause,
   EventTiming,
@@ -236,6 +239,10 @@ export const THAI_SITE_TRANSLATIONS: Record<string, string> = {
   "bilateral ears": "หูทั้งสองข้าง",
   ear: "หู",
   ears: "หูทั้งสองข้าง",
+  "ear canal": "ช่องหู",
+  "both ear canals": "ช่องหูทั้งสองข้าง",
+  "left ear canal": "ช่องหูซ้าย",
+  "right ear canal": "ช่องหูขวา",
   nostril: "รูจมูก",
   nostrils: "รูจมูกทั้งสองข้าง",
   "right nostril": "รูจมูกขวา",
@@ -293,18 +300,82 @@ export const THAI_SITE_TRANSLATIONS: Record<string, string> = {
   "both hands": "มือทั้งสองข้าง",
   hand: "มือ",
   hands: "มือทั้งสองข้าง",
+  finger: "นิ้วมือ",
+  fingers: "นิ้วมือ",
+  thumb: "นิ้วโป้ง",
+  "left thumb": "นิ้วโป้งซ้าย",
+  "right thumb": "นิ้วโป้งขวา",
+  "both thumbs": "นิ้วโป้งทั้งสองข้าง",
+  "index finger": "นิ้วชี้",
+  "left index finger": "นิ้วชี้ซ้าย",
+  "right index finger": "นิ้วชี้ขวา",
+  "both index fingers": "นิ้วชี้ทั้งสองข้าง",
+  "middle finger": "นิ้วกลาง",
+  "left middle finger": "นิ้วกลางซ้าย",
+  "right middle finger": "นิ้วกลางขวา",
+  "both middle fingers": "นิ้วกลางทั้งสองข้าง",
+  "ring finger": "นิ้วนาง",
+  "left ring finger": "นิ้วนางซ้าย",
+  "right ring finger": "นิ้วนางขวา",
+  "both ring fingers": "นิ้วนางทั้งสองข้าง",
+  "little finger": "นิ้วก้อย",
+  "left little finger": "นิ้วก้อยซ้าย",
+  "right little finger": "นิ้วก้อยขวา",
+  "both little fingers": "นิ้วก้อยทั้งสองข้าง",
+  toe: "นิ้วเท้า",
+  toes: "นิ้วเท้า",
+  "great toe": "นิ้วโป้งเท้า",
+  "big toe": "นิ้วโป้งเท้า",
+  "left great toe": "นิ้วโป้งเท้าซ้าย",
+  "right great toe": "นิ้วโป้งเท้าขวา",
+  "both great toes": "นิ้วโป้งเท้าทั้งสองข้าง",
+  "second toe": "นิ้วชี้เท้า",
+  "left second toe": "นิ้วชี้เท้าซ้าย",
+  "right second toe": "นิ้วชี้เท้าขวา",
+  "both second toes": "นิ้วชี้เท้าทั้งสองข้าง",
+  "third toe": "นิ้วกลางเท้า",
+  "left third toe": "นิ้วกลางเท้าซ้าย",
+  "right third toe": "นิ้วกลางเท้าขวา",
+  "both third toes": "นิ้วกลางเท้าทั้งสองข้าง",
+  "fourth toe": "นิ้วนางเท้า",
+  "left fourth toe": "นิ้วนางเท้าซ้าย",
+  "right fourth toe": "นิ้วนางเท้าขวา",
+  "both fourth toes": "นิ้วนางเท้าทั้งสองข้าง",
+  "fifth toe": "นิ้วก้อยเท้า",
+  "left fifth toe": "นิ้วก้อยเท้าซ้าย",
+  "right fifth toe": "นิ้วก้อยเท้าขวา",
+  "both fifth toes": "นิ้วก้อยเท้าทั้งสองข้าง",
+  "little toe": "นิ้วก้อยเท้า",
+  "between fingers": "ระหว่างนิ้วมือ",
+  "between toes": "ระหว่างนิ้วเท้า",
+  "back of hand": "หลังมือ",
+  "both backs of hands": "หลังมือทั้งสองข้าง",
+  palm: "ฝ่ามือ",
+  "both palms": "ฝ่ามือทั้งสองข้าง",
   "right foot": "เท้าขวา",
   "left foot": "เท้าซ้าย",
   "both feet": "เท้าทั้งสองข้าง",
   foot: "เท้า",
   feet: "เท้า",
-  abdomen: "ช่องท้อง",
-  abdominal: "ช่องท้อง",
+  "back of foot": "หลังเท้า",
+  "both backs of feet": "หลังเท้าทั้งสองข้าง",
+  "sole of foot": "ฝ่าเท้า",
+  "both soles": "ฝ่าเท้าทั้งสองข้าง",
+  heel: "ส้นเท้า",
+  "left heel": "ส้นเท้าซ้าย",
+  "right heel": "ส้นเท้าขวา",
+  "both heels": "ส้นเท้าทั้งสองข้าง",
+  abdomen: "ท้อง",
+  abdominal: "ท้อง",
   belly: "ท้อง",
+  flank: "สีข้าง",
+  "left flank": "สีข้างซ้าย",
+  "right flank": "สีข้างขวา",
   "affected area": "บริเวณที่เป็น",
   "affected site": "บริเวณที่เป็น",
   "บริเวณที่เป็น": "บริเวณที่เป็น",
   head: "ศีรษะ",
+  "back of head": "ด้านหลังศีรษะ",
   "left head": "ศีรษะซ้าย",
   "left side of head": "ศีรษะซ้าย",
   "right head": "ศีรษะขวา",
@@ -322,6 +393,13 @@ export const THAI_SITE_TRANSLATIONS: Record<string, string> = {
   armpit: "รักแร้",
   armpits: "รักแร้ทั้งสองข้าง",
   groin: "ขาหนีบ",
+  testis: "อัณฑะ",
+  testicle: "อัณฑะ",
+  testicles: "อัณฑะ",
+  "left testis": "อัณฑะซ้าย",
+  "left testicle": "อัณฑะซ้าย",
+  "right testis": "อัณฑะขวา",
+  "right testicle": "อัณฑะขวา",
   scalp: "หนังศีรษะ",
   face: "ใบหน้า",
   cheek: "แก้ม",
@@ -360,10 +438,16 @@ export const THAI_SITE_TRANSLATIONS: Record<string, string> = {
   buttocks: "สะโพกทั้งสองข้าง",
   gluteal: "สะโพก",
   glute: "สะโพก",
+  butt: "สะโพก",
+  ass: "สะโพก",
   "left buttock": "สะโพกซ้าย",
   "left gluteal": "สะโพกซ้าย",
+  "left butt": "สะโพกซ้าย",
+  "left ass": "สะโพกซ้าย",
   "right buttock": "สะโพกขวา",
   "right gluteal": "สะโพกขวา",
+  "right butt": "สะโพกขวา",
+  "right ass": "สะโพกขวา",
   muscle: "กล้ามเนื้อ",
   muscles: "กล้ามเนื้อทั้งหมด",
   vein: "หลอดเลือดดำ",
@@ -864,6 +948,9 @@ function describeFrequencyThai(schedule: CanonicalScheduleExpr | undefined): str
     return `ทุก ${stripTrailingZero(period)} วัน`;
   }
   if (periodUnit === FhirPeriodUnit.Week && period) {
+    if (schedule?.dayOfWeek?.length && period === 1 && (!periodMax || periodMax === 1)) {
+      return undefined;
+    }
     if (period === 1 && (!periodMax || periodMax === 1)) {
       return "สัปดาห์ละครั้ง";
     }
@@ -1188,7 +1275,9 @@ function formatSiteThai(clause: CanonicalSigClause, grammar: ThaiRouteGrammar): 
   ) {
     return undefined;
   }
-  const translated = translateSiteThai(text, codingCode);
+  const translated = text
+    ? translateSiteThai(text, codingCode, clause.site?.spatialRelation)
+    : translateSpatialSiteThai(undefined, clause.site?.spatialRelation);
   if (!translated) {
     return undefined;
   }
@@ -1200,21 +1289,110 @@ function formatSiteThai(clause: CanonicalSigClause, grammar: ThaiRouteGrammar): 
   return `${preposition}${separator}${translated}`.trim();
 }
 
-function translateSiteThai(site: string | undefined, code?: string): string | undefined {
-  if (code) {
-    const translatedByCode = THAI_SITE_CODE_TRANSLATIONS[code];
-    if (translatedByCode) {
-      return translatedByCode;
-    }
+const THAI_SPATIAL_RELATION_PREFIXES: Record<string, string> = {
+  above: "เหนือ",
+  around: "รอบ",
+  back: "ด้านหลัง",
+  behind: "ด้านหลัง",
+  below: "ใต้",
+  beneath: "ใต้",
+  center: "กลาง",
+  centre: "กลาง",
+  external: "ด้านนอก",
+  front: "ด้านหน้า",
+  inside: "ใน",
+  between: "ระหว่าง",
+  "left side": "ด้านซ้ายของ",
+  lower: "ส่วนล่างของ",
+  middle: "กลาง",
+  near: "ใกล้",
+  outside: "ด้านนอก",
+  "right side": "ด้านขวาของ",
+  side: "ด้านข้าง",
+  "both sides": "ทั้งสองด้านของ",
+  "bilateral sides": "ทั้งสองด้านของ",
+  top: "ด้านบนของ",
+  under: "ใต้",
+  upper: "ส่วนบนของ"
+};
+
+const THAI_SPATIAL_TARGET_TRANSLATION_OVERRIDES: Record<string, string> = {
+  abdomen: "ท้อง",
+  abdominal: "ท้อง",
+  belly: "ท้อง"
+};
+
+function translateSpatialTargetThai(
+  relation: BodySiteSpatialRelation
+): string | undefined {
+  const normalizedTarget = normalizeBodySiteKey(relation.targetText ?? "");
+  const override = THAI_SPATIAL_TARGET_TRANSLATION_OVERRIDES[normalizedTarget];
+  return override ?? translateSiteThai(
+    relation.targetText,
+    relation.targetCoding?.code
+  );
+}
+
+function translateSpatialSiteThai(
+  site: string | undefined,
+  relation?: BodySiteSpatialRelation
+): string | undefined {
+  const spatialRelation = relation ?? (site ? resolveBodySitePhrase(site)?.spatialRelation : undefined);
+  if (!spatialRelation?.relationText) {
+    return undefined;
   }
+  const prefix = THAI_SPATIAL_RELATION_PREFIXES[spatialRelation.relationText];
+  if (!prefix) {
+    return undefined;
+  }
+  const target = translateSpatialTargetThai(spatialRelation);
+  if (!target) {
+    return undefined;
+  }
+  switch (spatialRelation.relationText) {
+    case "left side":
+      return `${target}ด้านซ้าย`;
+    case "right side":
+      return `${target}ด้านขวา`;
+    case "both sides":
+    case "bilateral sides":
+      return `${target}ทั้งสองข้าง`;
+    default:
+      break;
+  }
+  return `${prefix}${target}`;
+}
+
+function translateSiteThai(
+  site: string | undefined,
+  code?: string,
+  spatialRelation?: BodySiteSpatialRelation
+): string | undefined {
   if (!site) {
+    if (code) {
+      return THAI_SITE_CODE_TRANSLATIONS[code];
+    }
     return undefined;
   }
   const normalized = normalizeBodySiteKey(site);
   if (!normalized) {
     return site;
   }
-  return THAI_SITE_TRANSLATIONS[normalized] ?? site;
+  const direct = THAI_SITE_TRANSLATIONS[normalized];
+  if (direct) {
+    return direct;
+  }
+  const spatial = translateSpatialSiteThai(site, spatialRelation);
+  if (spatial) {
+    return spatial;
+  }
+  if (code) {
+    const translatedByCode = THAI_SITE_CODE_TRANSLATIONS[code];
+    if (translatedByCode) {
+      return translatedByCode;
+    }
+  }
+  return site;
 }
 
 function describeDayOfWeekThai(schedule: CanonicalScheduleExpr | undefined): string | undefined {
@@ -1273,6 +1451,38 @@ function describeDurationThai(schedule: CanonicalScheduleExpr | undefined): stri
   return `เป็นเวลา ${stripTrailingZero(schedule.duration)} ${label()}`;
 }
 
+function findPrnReasonDefinitionByPossiblyPostcoordinatedCoding(
+  system: string,
+  code: string
+) {
+  const direct = findPrnReasonDefinitionByCoding(system, code);
+  if (direct) {
+    return direct;
+  }
+  const normalizedSystem = system.trim().toLowerCase();
+  if (!normalizedSystem.includes("snomed.info/sct")) {
+    return undefined;
+  }
+  return findPrnReasonDefinitionByCoding(system, code.split(":")[0] ?? code);
+}
+
+function translatePrnReasonThai(reason: CanonicalPrnReasonExpr): string | undefined {
+  let text = reason.text ?? reason.coding?.display;
+  const coding = reason.coding;
+  if (coding?.code) {
+    const definition = findPrnReasonDefinitionByPossiblyPostcoordinatedCoding(
+      coding.system ?? "http://snomed.info/sct",
+      coding.code
+    );
+    text = definition?.i18n?.th ?? text;
+  }
+  const spatial = translateSpatialSiteThai(undefined, reason.spatialRelation);
+  if (text && spatial) {
+    return `${text}${spatial}`;
+  }
+  return text;
+}
+
 function formatAsNeededThai(clause: CanonicalSigClause): string | undefined {
   if (!clause.prn?.enabled) {
     return undefined;
@@ -1280,15 +1490,7 @@ function formatAsNeededThai(clause: CanonicalSigClause): string | undefined {
   if (clause.prn.reasons?.length) {
     const translatedReasons: typeof clause.prn.reasons = [];
     for (const reason of clause.prn.reasons) {
-      let text = reason.text ?? reason.coding?.display;
-      const coding = reason.coding;
-      if (coding?.code) {
-        const definition = findPrnReasonDefinitionByCoding(
-          coding.system ?? "http://snomed.info/sct",
-          coding.code
-        );
-        text = definition?.i18n?.th ?? text;
-      }
+      const text = translatePrnReasonThai(reason);
       translatedReasons.push({ text, coding: reason.coding });
     }
     const joined = getPreferredCanonicalPrnReasonText(undefined, translatedReasons, "หรือ");
@@ -1299,13 +1501,14 @@ function formatAsNeededThai(clause: CanonicalSigClause): string | undefined {
   let translation: string | undefined;
   const coding = clause.prn.reason?.coding;
   if (coding?.code) {
-    const definition = findPrnReasonDefinitionByCoding(
+    const definition = findPrnReasonDefinitionByPossiblyPostcoordinatedCoding(
       coding.system ?? "http://snomed.info/sct",
       coding.code
     );
     translation = definition?.i18n?.th;
   }
   const reason =
+    translatePrnReasonThai(clause.prn.reason ?? {}) ??
     translation ??
     getPreferredCanonicalPrnReasonText(clause.prn.reason, clause.prn.reasons, "หรือ") ??
     coding?.display;

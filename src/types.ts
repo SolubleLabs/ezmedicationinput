@@ -4,6 +4,7 @@ export interface FhirCoding {
   system?: string;
   code?: string;
   display?: string;
+  extension?: FhirExtension[];
   _display?: FhirPrimitiveElement;
   i18n?: Record<string, string>;
 }
@@ -11,6 +12,7 @@ export interface FhirCoding {
 export interface FhirCodeableConcept {
   coding?: FhirCoding[];
   text?: string;
+  extension?: FhirExtension[];
   _text?: FhirPrimitiveElement;
 }
 
@@ -19,6 +21,8 @@ export interface FhirExtension {
   extension?: FhirExtension[];
   valueCode?: string;
   valueString?: string;
+  valueCoding?: FhirCoding;
+  valueCodeableConcept?: FhirCodeableConcept;
 }
 
 export interface FhirPrimitiveElement {
@@ -314,6 +318,12 @@ export const RouteCode = SNOMEDCTRouteCodes;
 
 export interface MedicationContext {
   dosageForm?: string;
+  /**
+   * Optional anatomical context used to disambiguate shorthand body-site
+   * phrases, e.g. Thai "ระหว่างนิ้ว" can mean fingers by default but toes
+   * when the active context is foot/feet/toes.
+   */
+  bodySiteContext?: string;
   /** "Simple" strength string; might be the only way strength is provided
    * for discrete units this is the amount of medication for unit e.g. "500 mg" (1 tablet), or for mixed tablets might be like "400 mg + 80 mg"
    * for things like creams or fluids or syrupsit might be "2%", 5 g/100g, 100mg/ 100 g, 262 mg/15 mL, 200 mg/2 mL, 1 mg/dL, or "400 mg/5mL + 80 mg/5mL"
@@ -363,9 +373,18 @@ export interface BodySiteCode {
   i18n?: Record<string, string>;
 }
 
+export interface BodySiteSpatialRelation {
+  relationText: string;
+  relationCoding?: FhirCoding;
+  targetText?: string;
+  targetCoding?: BodySiteCode;
+  sourceText?: string;
+}
+
 export interface BodySiteDefinition {
   coding?: BodySiteCode;
   text?: string;
+  spatialRelation?: BodySiteSpatialRelation;
   routeHint?: RouteCode;
   /**
    * Optional phrases that should resolve to the same coding as this entry.
@@ -490,6 +509,12 @@ export interface SiteCodeLookupRequest {
   sourceText?: string;
   /** Location of {@link sourceText} relative to the original input. */
   range?: TextRange;
+  /**
+   * Parsed spatial relation when the site phrase is relation + body site
+   * (for example, "below ear" or "top of hand"). Terminology callbacks can
+   * use this to code either the full site phrase or the relation target.
+   */
+  spatialRelation?: BodySiteSpatialRelation;
 }
 
 export interface SiteCodeResolution extends BodySiteDefinition { }
@@ -503,11 +528,22 @@ export interface SiteCodeSuggestionsResult {
   suggestions: SiteCodeSuggestion[];
 }
 
+/**
+ * PRN reason lookup context. For located reasons such as "pain at hand",
+ * `headCanonical` is the symptom head ("pain"), `locativeSiteCanonical` is the
+ * parsed site key when known ("hand"), `locativeSiteCoding` is preferred for
+ * coded SNOMED/FHIR output when present, and `locativeSiteSpatialRelation`
+ * carries modifiers such as "below ear" that refine the locative site.
+ */
 export interface PrnReasonLookupRequest {
   originalText: string;
   text: string;
   normalized: string;
   canonical: string;
+  headCanonical?: string;
+  locativeSiteCanonical?: string;
+  locativeSiteCoding?: FhirCoding;
+  locativeSiteSpatialRelation?: BodySiteSpatialRelation;
   isProbe: boolean;
   inputText: string;
   sourceText?: string;
@@ -692,6 +728,13 @@ export interface ParseOptions extends FormatOptions {
    */
   siteCodeMap?: Record<string, BodySiteDefinition>;
   /**
+   * Defaults to true. When true, parsed spatial body-site phrases without a
+   * direct pre-coordinated site code may emit SNOMED topographical modifier
+   * postcoordination in FHIR Dosage.site.coding while preserving the structured
+   * spatial-relation extension.
+   */
+  bodySitePostcoordination?: boolean;
+  /**
    * Explicit selections that override automatic site resolution for matching
    * phrases. Useful when custom dictionaries provide multiple options but a UI
    * workflow needs to pin a particular coding for a given match or range.
@@ -751,6 +794,7 @@ export interface CanonicalRouteExpr {
 export interface CanonicalSiteExpr {
   text?: string;
   coding?: BodySiteCode;
+  spatialRelation?: BodySiteSpatialRelation;
   source?: "abbreviation" | "text" | "selection" | "resolver";
   inferred?: boolean;
   evidence?: CanonicalEvidence[];
@@ -783,6 +827,7 @@ export interface CanonicalScheduleExpr {
 export interface CanonicalPrnReasonExpr {
   text?: string;
   coding?: FhirCoding;
+  spatialRelation?: BodySiteSpatialRelation;
 }
 
 export interface CanonicalPrnExpr {
@@ -856,12 +901,24 @@ export interface ParseResult {
 export interface ParseNormalizedMeta {
   route?: RouteCode;
   unit?: string;
-  site?: { text?: string; coding?: BodySiteCode };
+  site?: BodySiteDetail;
   method?: { text?: string; coding?: FhirCoding };
   patientInstruction?: string;
-  prnReason?: { text?: string; coding?: FhirCoding };
-  prnReasons?: Array<{ text?: string; coding?: FhirCoding }>;
+  prnReason?: ConceptSiteDetail;
+  prnReasons?: ConceptSiteDetail[];
   additionalInstructions?: Array<{ text?: string; coding?: FhirCoding }>;
+}
+
+export interface BodySiteDetail {
+  text?: string;
+  coding?: BodySiteCode;
+  spatialRelation?: BodySiteSpatialRelation;
+}
+
+export interface ConceptSiteDetail {
+  text?: string;
+  coding?: FhirCoding;
+  spatialRelation?: BodySiteSpatialRelation;
 }
 
 export interface ParseBatchSegmentMeta {
@@ -875,17 +932,17 @@ export interface ParseBatchResult {
   count: number;
   items: ParseResult[];
   /**
-   * Legacy compatibility field mirroring the first parsed item so existing
+   * Top-level compatibility field mirroring the first parsed item so existing
    * single-sig integrations can migrate incrementally.
    */
   fhir: FhirDosage;
   /**
-   * Legacy compatibility field mirroring the first parsed item so existing
+   * Top-level compatibility field mirroring the first parsed item so existing
    * single-sig integrations can migrate incrementally.
    */
   shortText: string;
   /**
-   * Legacy compatibility field mirroring the first parsed item so existing
+   * Top-level compatibility field mirroring the first parsed item so existing
    * single-sig integrations can migrate incrementally.
    */
   longText: string;
@@ -932,7 +989,7 @@ export interface LintBatchResult {
   count: number;
   items: LintResult[];
   /**
-   * Legacy compatibility fields mirroring the first parsed item so existing
+   * Top-level compatibility fields mirroring the first parsed item so existing
    * consumers of `lintSig` can migrate incrementally.
    */
   result: ParseResult;
