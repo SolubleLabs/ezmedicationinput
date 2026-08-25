@@ -2,6 +2,7 @@ import { DEFAULT_BODY_SITE_SNOMED, normalizeBodySiteKey } from "./maps";
 import { mergeI18nRecords } from "./fhir-translations";
 import { resolveSymptomDefinition } from "./symptom-terminology";
 import { objectEntries } from "./utils/object";
+import { AMBIGUOUS_DIGIT_SITE_KEYS, HAND_CONTEXT_KEYS, FOOT_CONTEXT_KEYS } from "./body-site-context-terminology";
 import { BodySiteCode, BodySiteDefinition, BodySiteSpatialRelation, FhirCoding, RouteCode } from "./types";
 import {
   BODY_SITE_LOCATIVE_RELATION_PHRASES,
@@ -104,9 +105,6 @@ export interface BodySitePhraseContext {
   allowTerminalModifierInheritance?: boolean;
 }
 
-const AMBIGUOUS_DIGIT_SITE_KEYS = new Set(["ระหว่างนิ้ว", "between digits"]);
-const HAND_CONTEXT_KEYS = new Set(["hand", "hands", "finger", "fingers", "นิ้วมือ", "มือ"]);
-const FOOT_CONTEXT_KEYS = new Set(["foot", "feet", "toe", "toes", "นิ้วเท้า", "เท้า"]);
 const BODY_SITE_ALIAS_INDEXES = new WeakMap<
   Record<string, BodySiteDefinition>,
   Map<string, BodySiteDefinition>
@@ -234,20 +232,16 @@ function lookupDefinitionForCanonical(
   );
 }
 
-function terminalInheritanceIsLicensed(canonical: string): boolean {
-  const words = canonical.split(/\s+/).filter(Boolean);
-  if (words.length < 2) return false;
-  return words.slice(0, -1).every((word) =>
-    BODY_SITE_ATTRIBUTIVE_MODIFIERS.has(word) || BODY_SITE_BARE_NOMINAL_PREFIXES.has(word)
-  );
-}
-
 function longestTerminalBodySiteDefinition(
   canonical: string,
   customSiteMap?: Record<string, BodySiteDefinition>
 ): { canonical: string; definition: BodySiteDefinition } | undefined {
   const words = canonical.split(/\s+/).filter(Boolean);
   for (let start = 1; start < words.length; start += 1) {
+    const prefix = words.slice(0, start);
+    if (!prefix.every((word) =>
+      BODY_SITE_ATTRIBUTIVE_MODIFIERS.has(word) || BODY_SITE_BARE_NOMINAL_PREFIXES.has(word)
+    )) continue;
     const suffix = words.slice(start).join(" ");
     const definition = lookupDefinitionForCanonical(suffix, customSiteMap);
     if (definition?.coding?.code || definition?.routeHint) return { canonical: suffix, definition };
@@ -863,8 +857,7 @@ export function resolveBodySitePhrase(
   const preliminaryFeatures = parseBodySiteFeatures(displayText, undefined, customSiteMap);
   const terminal = directDefinition ||
     !context?.allowTerminalModifierInheritance ||
-    preliminaryFeatures.kind !== "nominal" ||
-    !terminalInheritanceIsLicensed(canonical)
+    preliminaryFeatures.kind !== "nominal"
     ? undefined
     : longestTerminalBodySiteDefinition(canonical, customSiteMap);
   const baseDefinition = directDefinition ?? terminal?.definition;

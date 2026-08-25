@@ -18,6 +18,8 @@ import {
   resolveActionRelationSurfaceCandidates
 } from "../../relation-terminology";
 import { inferRouteFromContext } from "../../context";
+import { baseLanguageTag } from "../../localization";
+import { inferMedicationLocale } from "../../locale-detection";
 import { normalizeUnit } from "../../unit-lexicon";
 import {
   EVERY_INTERVAL_TOKENS,
@@ -164,6 +166,16 @@ function trimBraceRange(
   return { start, end };
 }
 
+function siteI18nWithSourceText(
+  sourceText: string,
+  definitionI18n: Record<string, string> | undefined,
+  context: HpsgClauseContext
+): Record<string, string> | undefined {
+  const sourceLocale = inferMedicationLocale(sourceText, "en");
+  if (sourceLocale === "en") return definitionI18n;
+  return { ...(definitionI18n ?? {}), [sourceLocale]: sourceText };
+}
+
 function shouldUseSiteRouteHint(sourceText: string, routeHint: RouteCode | undefined): routeHint is RouteCode {
   if (!routeHint || !SITE_ROUTE_HINTS_ALLOWED_IN_GRAMMAR.has(routeHint)) {
     return false;
@@ -205,6 +217,13 @@ function anchorTargetsTypedNonSiteConcept(
     if (!candidate || context.state.consumed.has(candidate.index)) break;
     const lower = normalizeTokenLower(candidate);
     if (isPunctuation(lower)) break;
+    if (cursor > start + 1 && SITE_TRAILING_INSTRUCTION_WORDS.has(lower)) break;
+    if (
+      BODY_SITE_ATTRIBUTIVE_MODIFIERS.has(lower) &&
+      anchoredModifierLeadsToResolvableSite(context, cursor)
+    ) {
+      continue;
+    }
     const concept = resolveMedicationInstructionConcept(lower, context.options);
     if (!concept) continue;
     return concept.role !== AdviceArgumentRole.Site && concept.role !== AdviceArgumentRole.Destination;
@@ -410,9 +429,8 @@ export function siteLexicalRule(): HpsgLexicalRule<HpsgClauseContext> {
           valence: {
             site: {
               text: displayText,
-              i18n: !resolved?.coding && resolved?.definition?.text === "affected area" &&
-                /[\u0E00-\u0E7F]/u.test(sourceText)
-                ? { ...(resolved?.definition?.i18n ?? {}), th: sourceText }
+              i18n: !resolved?.coding && resolved?.definition?.text === "affected area"
+                ? siteI18nWithSourceText(sourceText, resolved?.definition?.i18n, context)
                 : resolved?.definition?.i18n,
               source: "text",
               coding: resolved?.coding,
@@ -497,9 +515,8 @@ export function bareSiteLexicalRule(): HpsgLexicalRule<HpsgClauseContext> {
             valence: {
               site: {
                 text: displayText,
-                i18n: !resolved.coding && resolved.definition?.text === "affected area" &&
-                  /[\u0E00-\u0E7F]/u.test(sourceText)
-                  ? { ...(resolved.definition?.i18n ?? {}), th: sourceText }
+                i18n: !resolved.coding && resolved.definition?.text === "affected area"
+                  ? siteI18nWithSourceText(sourceText, resolved.definition?.i18n, context)
                   : resolved.definition?.i18n,
                 source: "text",
                 coding: resolved.coding,

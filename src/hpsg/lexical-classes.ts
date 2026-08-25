@@ -1,4 +1,5 @@
 import { AdviceModality, AdvicePolarity, EventTiming, RouteCode } from "../types";
+import { baseLanguageTag } from "../localization";
 import {
   ACTION_SEQUENCE_MARKERS,
   ACTION_SEQUENCE_RELATION_SURFACES,
@@ -22,6 +23,7 @@ type CompoundDoseUnit = {
   tails: string[];
   tailSequences?: string[][];
   requiresSiteContext?: boolean;
+  requiresProductContext?: boolean;
   unit: string;
 };
 
@@ -97,10 +99,8 @@ function numberRecord(record: Record<string, number>): Record<string, number> {
   return { ...record };
 }
 
-type InstructionQuantityUnitLabel = {
-  th: string;
-  enOne: string;
-  enOther: string;
+export type InstructionQuantityUnitLabel = {
+  locales: Record<string, { one: string; other: string }>;
 };
 
 function instructionQuantityUnitLabelMap(
@@ -109,7 +109,12 @@ function instructionQuantityUnitLabelMap(
   const result = new Map<string, InstructionQuantityUnitLabel>();
   for (const key in record) {
     if (Object.prototype.hasOwnProperty.call(record, key)) {
-      result.set(key, { ...record[key] });
+      const locales: Record<string, { one: string; other: string }> = {};
+      for (const locale of Object.keys(record[key].locales ?? {})) {
+        const value = record[key].locales[locale];
+        if (value) locales[locale] = { ...value };
+      }
+      result.set(key, { locales });
     }
   }
   return result;
@@ -169,7 +174,11 @@ export const BODY_SITE_PARTITIVE_HEADS = setOf(source.bodySitePartitiveHeads);
 export const BODY_SITE_PARTITIVE_MODIFIERS = setOf(source.bodySitePartitiveModifiers);
 export const BODY_SITE_PARTITIVE_CONNECTORS = setOf(source.bodySitePartitiveConnectors);
 export const BODY_SITE_BARE_NOMINAL_PREFIXES = setOf(source.bodySiteBareNominalPrefixes);
+export const BODY_SITE_BARE_NOMINAL_PREFIX_I18N = source.bodySiteBareNominalPrefixI18n as
+  Record<string, Record<string, string>>;
 export const BODY_SITE_ATTRIBUTIVE_MODIFIERS = setOf(source.bodySiteAttributiveModifiers);
+export const BODY_SITE_ATTRIBUTIVE_MODIFIER_I18N = source.bodySiteAttributiveModifierI18n as
+  Record<string, Record<string, string>>;
 export const OTIC_SITE_WORDS = setOf(source.oticSiteWords);
 export const OPHTHALMIC_SITE_WORDS = setOf(source.ophthalmicSiteWords);
 export const NASAL_SITE_WORDS = setOf(source.nasalSiteWords);
@@ -177,7 +186,15 @@ export const BODY_SITE_ADJECTIVE_SUFFIXES = source.bodySiteAdjectiveSuffixes as 
 export const BODY_SITE_DISPLAY_PENALTY_WORDS = setOf(source.bodySiteDisplayPenaltyWords);
 export const BODY_SITE_FEATURE_SCORE_BONUS = bodySiteFeatureScoreBonus(source.bodySiteFeatureScoreBonus);
 export const CONNECTORS = setOf(source.connectors);
-export const THAI_METHOD_AUXILIARY_VERBS = setOf(source.thaiMethodAuxiliaryVerbs);
+const METHOD_AUXILIARY_VERBS_SOURCE = source.methodAuxiliaryVerbsByLocale as Record<string, string[]>;
+const METHOD_AUXILIARY_VERBS_BY_LOCALE = Object.keys(METHOD_AUXILIARY_VERBS_SOURCE ?? {})
+  .reduce<Record<string, Set<string>>>((result, locale) => {
+    result[locale] = setOf(METHOD_AUXILIARY_VERBS_SOURCE[locale] ?? []);
+    return result;
+  }, {});
+export function methodAuxiliaryVerbsForLocale(locale: string): ReadonlySet<string> {
+  return METHOD_AUXILIARY_VERBS_BY_LOCALE[baseLanguageTag(locale) ?? locale.toLowerCase()] ?? new Set<string>();
+}
 export const COORDINATED_NOUN_METHOD_VERBS = setOf(source.coordinatedNounMethodVerbs);
 export const METHOD_NOUN_LEFT_CONTEXT = stringSetMap(source.methodNounLeftContext);
 export const PRODUCT_EXTERNAL_MODIFIERS = setOf(source.productExternalModifiers);
@@ -219,8 +236,12 @@ export const PRN_DEFAULT_SITE_CONNECTOR = source.prnDefaultSiteConnector;
 export const PRN_COMPACT_REASON_SEPARATORS = setOf(source.prnCompactReasonSeparators);
 
 export const SITE_ROUTE_HINTS_ALLOWED_IN_GRAMMAR = routeCodeSet(source.siteRouteHintsAllowedInGrammar);
-export const PRODUCT_METHOD_TEXT = source.productMethodText as Record<string, Partial<Record<string, string>>>;
-export const PRODUCT_METHOD_THAI = source.productMethodThai as Record<string, string>;
+export const PRODUCT_METHOD_REALIZATIONS = source.productMethodRealizations as
+  Record<string, Partial<Record<string, Record<string, string>>>>;
+export function productMethodRealizations(verb: string, product: string): Record<string, string> | undefined {
+  const values = PRODUCT_METHOD_REALIZATIONS[verb]?.[product];
+  return values ? { ...values } : undefined;
+}
 export const PRODUCT_FORM_MODIFIERS = setOf(source.productFormModifiers);
 export const COMPOUND_DOSE_UNITS = source.compoundDoseUnits as CompoundDoseUnit[];
 export const IMPLICIT_SINGLE_DOSE_UNITS = setOf(source.implicitSingleDoseUnits);
@@ -303,6 +324,8 @@ export const ACTION_DIRECTIVE_PREFIXES = source.actionDirectivePrefixes.map((pre
   modality: prefix.modality as AdviceModality | undefined
 }));
 export const ACTION_COORDINATION_CONNECTORS = setOf(source.actionCoordinationConnectors);
+export const ACTION_COORDINATION_CONNECTOR_I18N = source.actionCoordinationConnectorI18n as
+  Record<string, Record<string, string>>;
 export const ACTION_SEQUENCE_RELATION_TOKENS = ACTION_SEQUENCE_RELATION_SURFACES;
 export const INSTRUCTION_DURATION_UNITS = new Map<string, string>(
   stringEntries(source.instructionDurationUnits)
@@ -335,6 +358,7 @@ export const ADMINISTRATION_WINDOW_INSTRUCTIONS = (source.administrationWindowIn
   .map((entry) => ({
     parts: [...entry.parts],
     text: entry.text,
+    offsetOnly: (entry as { offsetOnly?: boolean }).offsetOnly === true,
     i18n: entry.i18n ? { ...entry.i18n } : undefined,
     relation: entry.relation as "before" | "after" | undefined,
     activity: entry.activity as string | undefined

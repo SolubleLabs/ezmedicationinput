@@ -16,9 +16,15 @@ import {
 } from "./types";
 import { normalizeLoosePhraseKey } from "./utils/text";
 import { resolveSymptomDefinition } from "./symptom-terminology";
+import { resolveMedicationInstructionAction } from "./instruction-action-terminology";
+import { composeLocalizedRecords, localizedValue } from "./localization";
+import { getAdviceLocaleAdapter } from "./advice-locale-adapter";
+import { joinLocalizedTokens } from "./locale-realization";
+import { ACTION_COORDINATION_CONNECTOR_I18N } from "./hpsg/lexical-classes";
 import {
   ACTION_SEQUENCE_MARKERS,
   localizeAdviceRelation,
+  resolveActionRelationSurface,
   resolveAdviceRelationSurface
 } from "./relation-terminology";
 
@@ -945,6 +951,46 @@ function mapSemanticClassToRole(semanticClass: string | undefined): AdviceArgume
   return enumValue<AdviceArgumentRole>(AdviceArgumentRole, configured) ?? AdviceArgumentRole.Object;
 }
 
+function bodySiteAdviceArgument(text: string): AdviceArgument | undefined {
+  const cleaned = cleanFreeText(text);
+  const withoutArticle = cleaned.replace(/^(?:the|a|an)\s+/iu, "").trim();
+  const resolveOne = (value: string) => resolveBodySitePhrase(value, undefined, {
+    allowTerminalModifierInheritance: true
+  });
+  const direct = resolveOne(withoutArticle);
+  if (direct?.coding || direct?.definition || direct?.spatialRelation) {
+    const coding = direct.coding ? { ...direct.coding } : undefined;
+    return {
+      role: AdviceArgumentRole.Site,
+      text: cleaned,
+      normalized: direct.displayText,
+      conceptId: direct.resolutionCanonical,
+      coding,
+      codings: coding ? [coding] : undefined,
+      i18n: { en: cleaned }
+    };
+  }
+  const match = withoutArticle.match(/^(.+?)\s+(and|or)\s+(.+)$/iu);
+  if (!match) return undefined;
+  const left = resolveOne(match[1].replace(/^(?:the|a|an)\s+/iu, "").trim());
+  const right = resolveOne(match[3].replace(/^(?:the|a|an)\s+/iu, "").trim());
+  if (!(left?.coding || left?.definition) || !(right?.coding || right?.definition)) return undefined;
+  const connector = match[2].toLowerCase();
+  const leftI18n = left.definition?.i18n ?? left.coding?.i18n;
+  const rightI18n = right.definition?.i18n ?? right.coding?.i18n;
+  const coordinatedI18n = composeLocalizedRecords(
+    [leftI18n, ACTION_COORDINATION_CONNECTOR_I18N[connector], rightI18n],
+    ([leftText, connectorText, rightText], locale) =>
+      joinLocalizedTokens(locale, [leftText, connectorText, rightText])
+  );
+  return {
+    role: AdviceArgumentRole.Site,
+    text: cleaned,
+    normalized: withoutArticle,
+    i18n: { en: cleaned, ...(coordinatedI18n ?? {}) }
+  };
+}
+
 function classifyArgument(text: string): AdviceArgument {
   const cleaned = cleanFreeText(text);
   const normalized = normalizeAdditionalInstructionKey(cleaned);
@@ -961,6 +1007,9 @@ function classifyArgument(text: string): AdviceArgument {
       concept.conceptId
     );
   }
+
+  const site = bodySiteAdviceArgument(cleaned);
+  if (site) return site;
 
   const symptom = resolveSymptomDefinition(normalized);
   if (symptom) {
@@ -1317,6 +1366,38 @@ function parseEmbeddedAvoidanceFrames(
   return frames;
 }
 
+function tryParseNegativeRelationInstruction(
+  sourceText: string,
+  span: TextRange,
+  context: AdviceParseContext,
+  sequenceIndex: number,
+  sequenceCount: number
+): AdviceFrame[] | undefined {
+  const words = normalizeWords(sourceText);
+  if (words.length < 3) return undefined;
+  const prefix = parseLeadingClauseFeatures(words);
+  if (!prefix || prefix.polarity !== AdvicePolarity.Negate || prefix.cursor >= words.length) return undefined;
+  const relation = isRelationWord(words[prefix.cursor]) ?? resolveActionRelationSurface(words[prefix.cursor]);
+  if (!relation) return undefined;
+  const targetText = words.slice(prefix.cursor + 1).join(" ");
+  if (!targetText) return undefined;
+  const argument = classifyArgument(targetText);
+  if (argument.role !== AdviceArgumentRole.Site && argument.role !== AdviceArgumentRole.Destination) {
+    return undefined;
+  }
+  return [createFrame(
+    sourceText,
+    span,
+    sequenceCount > 1 ? AdviceForce.Sequence : AdviceForce.Warning,
+    "apply",
+    "administration",
+    [argument],
+    sequenceIndex,
+    relation,
+    AdvicePolarity.Negate
+  )];
+}
+
 function tryParseNoObjectInstruction(
   sourceText: string,
   span: TextRange,
@@ -1485,7 +1566,9 @@ interface AdviceVerbArgumentParse {
 type AdviceVerbArgumentParser = (words: string[], lexeme?: AdviceLexemeEntry) => AdviceVerbArgumentParse;
 
 const DEFAULT_ADVICE_VERB_ARGUMENT_PARSER: AdviceVerbArgumentParser = (remainderWords) => {
-  const relation = remainderWords.length ? isRelationWord(remainderWords[0]) : undefined;
+  const relation = remainderWords.length
+    ? isRelationWord(remainderWords[0]) ?? resolveActionRelationSurface(remainderWords[0])
+    : undefined;
   const objectText = remainderWords.slice(relation ? 1 : 0).join(" ");
   return { relation, args: objectText ? [classifyArgument(objectText)] : [] };
 };
@@ -1643,6 +1726,7 @@ function parseSequenceFrames(
       tryParseRelationInstruction(segment.text, segment.range, context, index, sequenceSegments.length) ??
       tryParseImplicitConceptInstruction(segment.text, segment.range, context, index, sequenceSegments.length) ??
       tryParseStyleInstruction(segment.text, segment.range, context, index, sequenceSegments.length) ??
+      tryParseNegativeRelationInstruction(segment.text, segment.range, context, index, sequenceSegments.length) ??
       tryParseNoObjectInstruction(segment.text, segment.range, index, sequenceSegments.length) ??
       tryParseEllipticalEffectInstruction(
         segment.text,
@@ -1693,35 +1777,13 @@ function shouldAllowFallbackText(sourceText: string, allowFreeTextFallback: bool
   return Boolean(allowFreeTextFallback && cleanFreeText(sourceText));
 }
 
-function capitalizeSentence(value: string): string {
-  if (!value) {
-    return value;
-  }
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function realizeAdviceModality(modality: AdviceModality | undefined, locale = "en"): string | undefined {
-  if (!modality) return undefined;
-  if (locale.toLowerCase().startsWith("th")) {
-    const thai: Partial<Record<AdviceModality, string>> = {
-      [AdviceModality.May]: "อาจ",
-      [AdviceModality.Can]: "สามารถ",
-      [AdviceModality.Should]: "ควร",
-      [AdviceModality.Must]: "ต้อง"
-    };
-    return thai[modality] ?? modality;
-  }
-  return capitalizeSentence(modality);
-}
-
 function localizedAdviceArgumentText(arg: AdviceArgument, locale: string): string | undefined {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
-  if (arg.i18n?.[language]) return arg.i18n[language];
-  if (language === "th") {
-    const site = resolveBodySitePhrase(arg.text);
-    const siteText = site?.definition?.i18n?.th ?? site?.coding?.i18n?.th;
-    if (siteText) return /^บริเวณ/u.test(siteText) ? siteText : `บริเวณ${siteText}`;
-  }
+  const localized = localizedValue(arg.i18n, locale);
+  if (localized) return localized;
+  const site = resolveBodySitePhrase(arg.text, undefined, { allowTerminalModifierInheritance: true });
+  const siteText = localizedValue(site?.definition?.i18n, locale) ??
+    localizedValue(site?.coding?.i18n, locale);
+  if (siteText) return getAdviceLocaleAdapter(locale).siteArgument(siteText);
   return cleanFreeText(arg.text);
 }
 
@@ -1729,96 +1791,33 @@ function joinAdviceArgumentTexts(args: AdviceArgument[], locale = "en"): string 
   const texts = args
     .map((arg) => localizedAdviceArgumentText(arg, locale))
     .filter((text): text is string => Boolean(text));
-  if (!texts.length) return undefined;
-  if (locale.toLowerCase().startsWith("th")) {
-    if (texts.length === 1) return texts[0];
-    if (texts.length === 2) return `${texts[0]} และ ${texts[1]}`;
-    return `${texts.slice(0, -1).join(", ")} และ ${texts[texts.length - 1]}`;
-  }
-
-  let text = "";
-  for (let index = 0; index < texts.length; index += 1) {
-    if (index > 0) text += index === 1 ? " and " : ", ";
-    text += texts[index];
-  }
-  return text;
+  return getAdviceLocaleAdapter(locale).joinArguments(texts);
 }
-
-interface AdviceRealizationContext {
-  frame: AdviceFrame;
-  argText?: string;
-  modalityText?: string;
-  relationText?: string;
-}
-
-type AdvicePredicateRealizer = (context: AdviceRealizationContext) => string;
-
-const DEFAULT_ADVICE_PREDICATE_REALIZER: AdvicePredicateRealizer = ({
-  frame, argText, modalityText, relationText
-}) => {
-  let text = modalityText
-    ? `${modalityText} ${frame.predicate.lemma}`
-    : capitalizeSentence(frame.predicate.lemma);
-  if (relationText) text += ` ${relationText}`;
-  if (argText) text += ` ${argText}`;
-  return text;
-};
-
-const AVOIDANCE_ADVICE_PREDICATE_REALIZER: AdvicePredicateRealizer = ({ frame, argText, modalityText }) => {
-  const thai = /[\u0E00-\u0E7F]/u.test(frame.predicate.lemma);
-  const predicate = modalityText
-    ? thai ? `${modalityText}${frame.predicate.lemma}` : `${modalityText} ${frame.predicate.lemma}`
-    : thai ? frame.predicate.lemma : capitalizeSentence(frame.predicate.lemma);
-  return argText ? `${predicate}${thai ? "" : " "}${argText}` : predicate;
-};
-
-const EFFECT_ADVICE_PREDICATE_REALIZER: AdvicePredicateRealizer = ({ frame, argText, modalityText }) => {
-  const effectiveModality = modalityText ?? capitalizeSentence(AdviceModality.May);
-  const thai = /[\u0E00-\u0E7F]/u.test(frame.predicate.lemma);
-  const predicate = thai
-    ? `${effectiveModality}${frame.predicate.lemma}`
-    : `${effectiveModality} ${frame.predicate.lemma}`;
-  return argText ? `${predicate}${thai ? "" : " "}${argText}` : predicate;
-};
-
-const ADVICE_PREDICATE_REALIZERS: Record<string, AdvicePredicateRealizer> = {
-  default: DEFAULT_ADVICE_PREDICATE_REALIZER,
-  avoidance: AVOIDANCE_ADVICE_PREDICATE_REALIZER,
-  effect: EFFECT_ADVICE_PREDICATE_REALIZER
-};
 
 function realizeSingleAdviceFrame(frame: AdviceFrame, locale = "en"): string | undefined {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
+  const adapter = getAdviceLocaleAdapter(locale);
   const argText = joinAdviceArgumentTexts(frame.args, locale);
-  const modalityText = realizeAdviceModality(frame.modality, locale);
+  const modalityText = adapter.realizeModality(frame.modality);
   const relationText = localizeAdviceRelation(frame.relation, locale);
   const lexeme = findVerbLexeme(frame.predicate.lemma);
-  const localizedPredicate = language === "th"
-    ? lexeme?.i18n?.th ?? frame.predicate.lemma
-    : frame.predicate.lemma;
-  if (frame.polarity === AdvicePolarity.Negate) {
-    let text = language === "th"
-      ? `ห้าม${localizedPredicate}`
-      : `${frame.modality === AdviceModality.Must ? "Must not" : "Do not"} ${localizedPredicate}`;
-    if (relationText) text += ` ${relationText}`;
-    if (argText) text += ` ${argText}`;
-    return text;
-  }
-
-  const realizer = ADVICE_PREDICATE_REALIZERS[lexeme?.realizerProfile ?? "default"] ??
-    DEFAULT_ADVICE_PREDICATE_REALIZER;
-  const localizedFrame = language === "th"
-    ? { ...frame, predicate: { ...frame.predicate, lemma: localizedPredicate } }
-    : frame;
-  return realizer({ frame: localizedFrame, argText, modalityText, relationText });
+  const sharedAction = resolveMedicationInstructionAction(frame.predicate.lemma);
+  const localizedPredicate = localizedValue(lexeme?.i18n, locale) ??
+    localizedValue(sharedAction?.i18n, locale) ??
+    frame.predicate.lemma;
+  return adapter.realize({
+    frame,
+    predicate: localizedPredicate,
+    realizerProfile: lexeme?.realizerProfile ?? "default",
+    argText,
+    modalityText,
+    relationText
+  });
 }
 
 export function realizeAdviceFramesText(frames: AdviceFrame[], locale = "en"): string | undefined {
-  if (frames.length !== 1) {
-    return undefined;
-  }
+  if (frames.length !== 1) return undefined;
   const realized = realizeSingleAdviceFrame(frames[0], locale);
-  return realized ? (locale.toLowerCase().startsWith("th") ? realized : capitalizeSentence(realized)) : undefined;
+  return realized ? getAdviceLocaleAdapter(locale).finalize(realized) : undefined;
 }
 
 export function parseAdditionalInstructions(

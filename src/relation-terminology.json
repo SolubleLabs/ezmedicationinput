@@ -28,6 +28,12 @@
         "en": "with",
         "th": "พร้อม"
       },
+      "realizationProfiles": {
+        "complement": {
+          "en": "with",
+          "th": "ร่วมกับ"
+        }
+      },
       "semanticClass": "accompaniment",
       "grammar": {
         "timeComplement": true,
@@ -370,6 +376,8 @@
       "relation": "on",
       "actionSurfaces": [
         "on",
+        "onto",
+        "over",
         "at"
       ],
       "adviceSurfaces": [

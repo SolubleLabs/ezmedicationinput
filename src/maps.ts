@@ -239,7 +239,7 @@ interface LateralizableBodySiteDefinition {
   display: string;
   englishNames: string[];
   pluralEnglishNames: string[];
-  thaiNames: string[];
+  localeNames: Record<string, string[]>;
   routeHint?: RouteCode;
 }
 
@@ -247,21 +247,21 @@ const BODY_SITE_LATERALITIES = [
   {
     textPrefix: "left",
     englishPrefix: "left",
-    thaiSuffixes: ["ซ้าย"],
+    localeSuffixes: { th: ["ซ้าย"] },
     code: SNOMED_CT_LEFT_QUALIFIER_CODE,
     display: SNOMED_CT_LEFT_QUALIFIER_DISPLAY
   },
   {
     textPrefix: "right",
     englishPrefix: "right",
-    thaiSuffixes: ["ขวา"],
+    localeSuffixes: { th: ["ขวา"] },
     code: SNOMED_CT_RIGHT_QUALIFIER_CODE,
     display: SNOMED_CT_RIGHT_QUALIFIER_DISPLAY
   },
   {
     textPrefix: "both",
     englishPrefix: "both",
-    thaiSuffixes: ["ทั้งสองข้าง", "สองข้าง"],
+    localeSuffixes: { th: ["ทั้งสองข้าง", "สองข้าง"] },
     code: SNOMED_CT_BILATERAL_QUALIFIER_CODE,
     display: SNOMED_CT_BILATERAL_QUALIFIER_DISPLAY
   }
@@ -275,7 +275,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Thumb",
     englishNames: ["thumb"],
     pluralEnglishNames: ["thumbs"],
-    thaiNames: ["นิ้วโป้ง", "นิ้วโป้งมือ", "นิ้วหัวแม่มือ", "หัวแม่มือ"]
+    localeNames: { th: ["นิ้วโป้ง", "นิ้วโป้งมือ", "นิ้วหัวแม่มือ", "หัวแม่มือ"] }
   },
   {
     text: "index finger",
@@ -284,7 +284,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Index finger",
     englishNames: ["index finger"],
     pluralEnglishNames: ["index fingers"],
-    thaiNames: ["นิ้วชี้", "นิ้วชี้มือ"]
+    localeNames: { th: ["นิ้วชี้", "นิ้วชี้มือ"] }
   },
   {
     text: "middle finger",
@@ -293,7 +293,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Middle finger",
     englishNames: ["middle finger"],
     pluralEnglishNames: ["middle fingers"],
-    thaiNames: ["นิ้วกลาง", "นิ้วกลางมือ"]
+    localeNames: { th: ["นิ้วกลาง", "นิ้วกลางมือ"] }
   },
   {
     text: "ring finger",
@@ -302,7 +302,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Ring finger",
     englishNames: ["ring finger"],
     pluralEnglishNames: ["ring fingers"],
-    thaiNames: ["นิ้วนาง", "นิ้วนางมือ"]
+    localeNames: { th: ["นิ้วนาง", "นิ้วนางมือ"] }
   },
   {
     text: "little finger",
@@ -311,7 +311,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Little finger",
     englishNames: ["little finger", "pinky", "pinkie"],
     pluralEnglishNames: ["little fingers", "pinkies"],
-    thaiNames: ["นิ้วก้อย", "นิ้วก้อยมือ"]
+    localeNames: { th: ["นิ้วก้อย", "นิ้วก้อยมือ"] }
   },
   {
     text: "great toe",
@@ -320,7 +320,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Great toe",
     englishNames: ["great toe", "big toe"],
     pluralEnglishNames: ["great toes", "big toes"],
-    thaiNames: ["นิ้วโป้งเท้า", "นิ้วหัวแม่เท้า", "หัวแม่เท้า"]
+    localeNames: { th: ["นิ้วโป้งเท้า", "นิ้วหัวแม่เท้า", "หัวแม่เท้า"] }
   },
   {
     text: "second toe",
@@ -329,7 +329,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Second toe",
     englishNames: ["second toe", "2nd toe"],
     pluralEnglishNames: ["second toes", "2nd toes"],
-    thaiNames: ["นิ้วชี้เท้า"]
+    localeNames: { th: ["นิ้วชี้เท้า"] }
   },
   {
     text: "third toe",
@@ -338,7 +338,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Third toe",
     englishNames: ["third toe", "3rd toe"],
     pluralEnglishNames: ["third toes", "3rd toes"],
-    thaiNames: ["นิ้วกลางเท้า"]
+    localeNames: { th: ["นิ้วกลางเท้า"] }
   },
   {
     text: "fourth toe",
@@ -347,7 +347,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Fourth toe",
     englishNames: ["fourth toe", "4th toe"],
     pluralEnglishNames: ["fourth toes", "4th toes"],
-    thaiNames: ["นิ้วนางเท้า"]
+    localeNames: { th: ["นิ้วนางเท้า"] }
   },
   {
     text: "fifth toe",
@@ -356,7 +356,7 @@ const LATERALIZABLE_DIGIT_BODY_SITES: LateralizableBodySiteDefinition[] = [
     display: "Fifth toe",
     englishNames: ["fifth toe", "5th toe", "little toe"],
     pluralEnglishNames: ["fifth toes", "5th toes", "little toes"],
-    thaiNames: ["นิ้วก้อยเท้า"]
+    localeNames: { th: ["นิ้วก้อยเท้า"] }
   }
 ];
 
@@ -368,9 +368,10 @@ function buildLateralizedDigitBodySiteEntries(): BodySiteSnomedSourceEntry[] {
       const text = `${laterality.textPrefix} ${isBilateral ? site.pluralText : site.text}`;
       const englishNames = isBilateral ? site.pluralEnglishNames : site.englishNames;
       const names = englishNames.map((name) => `${laterality.englishPrefix} ${name}`);
-      for (const name of site.thaiNames) {
-        for (const suffix of laterality.thaiSuffixes) {
-          names.push(`${name}${suffix}`);
+      for (const locale of Object.keys(site.localeNames)) {
+        const suffixes = laterality.localeSuffixes[locale as keyof typeof laterality.localeSuffixes] ?? [];
+        for (const name of site.localeNames[locale] ?? []) {
+          for (const suffix of suffixes) names.push(`${name}${suffix}`);
         }
       }
       entries.push({
@@ -582,8 +583,13 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       }
     },
     {
-      names: ["lip", "lips"],
-      definition: { coding: { code: "48477009", display: "Lip structure" }, routeHint: RouteCode["Topical route"] }
+      names: ["lip", "lips", "ริมฝีปาก"],
+      definition: {
+        coding: { code: "48477009", display: "Lip structure" },
+        text: "lip",
+        i18n: { th: "ริมฝีปาก" },
+        routeHint: RouteCode["Topical route"]
+      }
     },
     {
       names: ["cheek", "cheeks"],
@@ -775,6 +781,7 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "85562004", display: "Hand" },
         text: "hand",
+        i18n: { th: "มือ" },
         routeHint: RouteCode["Topical route"]
       }
     },
@@ -783,6 +790,7 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "85151006", display: "Left hand" },
         text: "left hand",
+        i18n: { th: "มือซ้าย" },
         routeHint: RouteCode["Topical route"]
       }
     },
@@ -791,6 +799,7 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "78791008", display: "Right hand" },
         text: "right hand",
+        i18n: { th: "มือขวา" },
         routeHint: RouteCode["Topical route"]
       }
     },
@@ -799,6 +808,15 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "7569003", display: "Finger structure" },
         text: "fingers",
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["fingertip", "finger tip", "ปลายนิ้ว", "ปลายนิ้วมือ"],
+      definition: {
+        coding: { code: "280424004", display: "Skin structure of fingertip" },
+        text: "fingertip",
+        i18n: { th: "ปลายนิ้ว" },
         routeHint: RouteCode["Topical route"]
       }
     },
@@ -1137,6 +1155,30 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       }
     },
     {
+      names: ["wound", "wounds", "แผล"],
+      definition: {
+        text: "wound",
+        i18n: { th: "แผล" },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["spot", "spots", "acne spot", "acne spots", "จุด"],
+      definition: {
+        text: "spot",
+        i18n: { th: "จุดที่มีอาการ" },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["acne lesion", "acne lesions", "รอยโรคสิว"],
+      definition: {
+        text: "acne lesion",
+        i18n: { th: "รอยโรคสิว" },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
       names: ["left head", "left side of head"],
       definition: { coding: { code: "64237003", display: "Structure of left half of head" }, routeHint: RouteCode["Topical route"] }
     },
@@ -1247,6 +1289,7 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "41695006", display: "Scalp" },
         text: "scalp",
+        i18n: { th: "หนังศีรษะ" },
         routeHint: RouteCode["Topical route"]
       }
     },
@@ -1471,6 +1514,15 @@ export const DEFAULT_BODY_SITE_SNOMED_SOURCE: BodySiteSnomedSourceEntry[] = [
       definition: {
         coding: { code: "45292006", display: "Vulval structure" },
         text: "vulva",
+        i18n: { th: "อวัยวะเพศหญิงภายนอก" },
+        routeHint: RouteCode["Topical route"]
+      }
+    },
+    {
+      names: ["external vulva", "external vulval area", "external vulvar area"],
+      definition: {
+        coding: { code: "45292006", display: "Vulval structure" },
+        text: "external vulva",
         i18n: { th: "อวัยวะเพศหญิงภายนอก" },
         routeHint: RouteCode["Topical route"]
       }

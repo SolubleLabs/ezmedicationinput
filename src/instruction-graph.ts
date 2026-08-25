@@ -1,9 +1,17 @@
 import { resolveBodySitePhrase } from "./body-site-grammar";
+import { stripBodySiteSourceLead } from "./body-site-context-terminology";
 import { lexInput } from "./lexer/lex";
 import { normalizeUnit } from "./unit-lexicon";
 import { EVENT_TIMING_TOKENS, PRODUCT_FORM_HINTS, TIMING_ABBREVIATIONS, WORD_FREQUENCIES } from "./maps";
 import { resolveEventTimingExpression } from "./event-timing-expression";
 import { resolveSymptomDefinition } from "./symptom-terminology";
+import { baseLanguageTag, composeLocalizedRecords, localizedConfig, localizedValue } from "./localization";
+import { inferMedicationLocale } from "./locale-detection";
+import {
+  getInstructionActionLocaleAdapter,
+  InstructionActionRealizationInput
+} from "./instruction-action-locale-adapter";
+import { joinLocalizedTokens, localeRealizationProfile, localizedTimeArgument, renderLocaleTemplate } from "./locale-realization";
 import {
   BODY_SITE_LOCATIVE_RELATION_PHRASES,
   getUniqueAdviceRelationByGrammarFeature,
@@ -17,10 +25,13 @@ import {
 } from "./relation-terminology";
 import {
   ACTION_COORDINATION_CONNECTORS,
+  ACTION_COORDINATION_CONNECTOR_I18N,
   ACTION_DIRECTIVE_PREFIXES,
   ACTION_SEQUENCE_MARKERS,
   ACTION_SEQUENCE_RELATION_TOKENS,
+  BODY_SITE_ATTRIBUTIVE_MODIFIERS,
   AS_NEEDED_LEAD_PHRASES,
+  COMPOUND_DOSE_UNITS,
   DURATION_LEAD_TOKENS,
   EVENT_OFFSET_ARTICLES,
   EVENT_OFFSET_FRACTIONS,
@@ -31,16 +42,20 @@ import {
   MEAL_TIMING_BY_RELATION,
   PRN_LEADS,
   RANGE_CONNECTORS,
-  THAI_METHOD_AUXILIARY_VERBS
+  ROUTE_SITE_PREPOSITIONS,
+  SITE_ANCHORS,
+  methodAuxiliaryVerbsForLocale
 } from "./hpsg/lexical-classes";
-import { FREQUENCY_SIMPLE_WORDS } from "./hpsg/timing-lexicon";
+import { EVERY_INTERVAL_TOKENS, FREQUENCY_SIMPLE_WORDS } from "./hpsg/timing-lexicon";
 import {
   medicationInstructionConceptCodings,
   resolveMedicationInstructionConcept
 } from "./instruction-concept-terminology";
 import {
+  cloneMedicationInstructionActionRealizerConfig,
   getMedicationInstructionAction,
   medicationInstructionActionCodings,
+  medicationInstructionActionLocaleRealizerConfig,
   normalizeActionSurface,
   resolveMedicationInstructionAction,
   resolveMedicationInstructionSeparableAction
@@ -131,6 +146,37 @@ function actionPhraseCandidates(parts: Lexeme[], index: number, length: number):
   return Array.from(candidates).filter((candidate) => candidate.trim().length > 0);
 }
 
+function actionCandidateIsAnchoredSiteModifier(
+  parts: Lexeme[],
+  index: number,
+  options?: ParseOptions
+): boolean {
+  if (!BODY_SITE_ATTRIBUTIVE_MODIFIERS.has(key(parts[index]))) return false;
+  let modifierStart = index;
+  while (
+    modifierStart > 0 &&
+    BODY_SITE_ATTRIBUTIVE_MODIFIERS.has(key(parts[modifierStart - 1]))
+  ) modifierStart -= 1;
+  const anchorIndex = modifierStart - 1;
+  if (
+    anchorIndex < 0 ||
+    (!SITE_ANCHORS.has(key(parts[anchorIndex])) && !ROUTE_SITE_PREPOSITIONS.has(key(parts[anchorIndex])))
+  ) return false;
+  const maxEnd = Math.min(parts.length, index + 5);
+  for (let end = index + 2; end <= maxEnd; end += 1) {
+    const candidateText = parts
+      .slice(modifierStart, end)
+      .map((part) => part.original)
+      .join(" ");
+    const resolved = resolveBodySitePhrase(candidateText, options?.siteCodeMap, {
+      bodySiteContext: options?.context?.bodySiteContext,
+      allowTerminalModifierInheritance: true
+    });
+    if (resolved?.coding || resolved?.definition) return true;
+  }
+  return false;
+}
+
 function actionCandidateIsPerPeriodGrammar(parts: Lexeme[], index: number): boolean {
   const current = parts[index];
   const next = parts[index + 1];
@@ -164,7 +210,10 @@ function actionMatchAt(
       const definition = resolveMedicationInstructionAction(candidate, options);
       if (definition) {
         const first = parts[index];
-        if (THAI_METHOD_AUXILIARY_VERBS.has(definition.code) && first && /[\u0E00-\u0E7F]/.test(first.original)) {
+        const actionLocale = first
+          ? baseLanguageTag(options?.locale) ?? inferMedicationLocale(first.original, "en")
+          : "en";
+        if (first && methodAuxiliaryVerbsForLocale(actionLocale).has(definition.code)) {
           const next = parts[index + length];
           const nextDefinition = next
             ? resolveMedicationInstructionAction(key(next), options)
@@ -201,12 +250,10 @@ function rangeFor(parts: Lexeme[], start: number, endExclusive: number, offset: 
 }
 
 function codingFromSite(text: string, options?: ParseOptions): AdviceArgument | undefined {
-  const lookupText = text
-    .replace(/^\s*บริเวณ\s*/u, "")
-    .replace(/^\s*(?:the|a|an)\s+/i, "")
-    .trim() || text;
+  const lookupText = stripBodySiteSourceLead(text) || text;
   const resolved = resolveBodySitePhrase(lookupText, options?.siteCodeMap, {
-    bodySiteContext: options?.context?.bodySiteContext
+    bodySiteContext: options?.context?.bodySiteContext,
+    allowTerminalModifierInheritance: true
   });
   if (!resolved || (!resolved.coding && !resolved.definition)) return undefined;
   return {
@@ -219,7 +266,10 @@ function codingFromSite(text: string, options?: ParseOptions): AdviceArgument | 
     i18n: {
       en: resolved.englishObjectText,
       ...(resolved.definition?.i18n ?? {}),
-      ...(/[\u0E00-\u0E7F]/.test(text) ? { th: text } : {})
+      ...(() => {
+        const sourceLocale = inferMedicationLocale(text, "en");
+        return sourceLocale === "en" ? {} : { [sourceLocale]: text };
+      })()
     }
   };
 }
@@ -328,6 +378,8 @@ function argumentFromParts(
     // constructional fallback. The fallback is only for opaque/free text.
     return direct;
   }
+  const coordinated = coordinatedTypedArgumentFromParts(parts, start, endExclusive, input, options);
+  if (coordinated) return coordinated;
   const resolvedSite = codingFromSite(text, options);
   if (resolvedSite) {
     if (preferredRole === AdviceArgumentRole.Destination) resolvedSite.role = AdviceArgumentRole.Destination;
@@ -341,6 +393,39 @@ function argumentFromParts(
     text,
     normalized: allPartsCanonical && canonical ? canonical : text.toLowerCase()
   };
+}
+
+function coordinatedTypedArgumentFromParts(
+  parts: Lexeme[],
+  start: number,
+  endExclusive: number,
+  input: string,
+  options?: ParseOptions
+): AdviceArgument | undefined {
+  for (let index = start + 1; index + 1 < endExclusive; index += 1) {
+    const connector = key(parts[index]);
+    if (connector !== "and" && connector !== "or") continue;
+    const left = argumentFromParts(parts, start, index, input, AdviceArgumentRole.Activity, options);
+    const right = argumentFromParts(parts, index + 1, endExclusive, input, AdviceArgumentRole.Activity, options);
+    if (
+      !left?.conceptId || !right?.conceptId ||
+      left.role !== AdviceArgumentRole.Activity || right.role !== AdviceArgumentRole.Activity
+    ) continue;
+    const enLeft = left.i18n?.en ?? left.normalized ?? left.text;
+    const enRight = right.i18n?.en ?? right.normalized ?? right.text;
+    const i18n = composeLocalizedRecords(
+      [left.i18n, ACTION_COORDINATION_CONNECTOR_I18N[connector], right.i18n],
+      ([leftText, connectorText, rightText], locale) =>
+        joinLocalizedTokens(locale, [leftText, connectorText, rightText])
+    );
+    return {
+      role: AdviceArgumentRole.Activity,
+      text: trimSemanticText(sourceFor(parts, start, endExclusive, input)),
+      normalized: `${enLeft} ${connector} ${enRight}`,
+      i18n: { en: `${enLeft} ${connector} ${enRight}`, ...(i18n ?? {}) }
+    };
+  }
+  return undefined;
 }
 
 function pushArgument(args: AdviceArgument[], argument: AdviceArgument | undefined): void {
@@ -390,6 +475,87 @@ const INSTRUCTION_NUMBER_WORDS: Readonly<Record<string, number>> = {
   seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12
 };
 
+interface InstructionQuantityUnitMatch { unit: string; endExclusive: number; }
+
+function instructionQuantityHasProductContext(
+  parts: Lexeme[],
+  start: number,
+  endExclusive: number
+): boolean {
+  let cursor = start;
+  while (cursor < endExclusive) {
+    const current = key(parts[cursor]);
+    if (!current) return false;
+    if (current === "of" || current === "a" || current === "an" || current === "the") {
+      cursor += 1;
+      continue;
+    }
+    return Boolean(PRODUCT_FORM_HINTS[current]);
+  }
+  return false;
+}
+
+function instructionQuantityHasResolvedSiteContext(
+  parts: Lexeme[],
+  endExclusive: number,
+  options?: ParseOptions
+): boolean {
+  const contextualSite = options?.context?.bodySiteContext?.trim();
+  if (contextualSite) {
+    const resolvedContext = resolveBodySitePhrase(contextualSite, options?.siteCodeMap, {
+      bodySiteContext: contextualSite,
+      allowTerminalModifierInheritance: true
+    });
+    if (resolvedContext?.coding || resolvedContext?.definition) return true;
+  }
+
+  const searchEnd = Math.min(parts.length, endExclusive);
+  for (let anchorIndex = 0; anchorIndex < searchEnd; anchorIndex += 1) {
+    const anchor = key(parts[anchorIndex]);
+    if (!SITE_ANCHORS.has(anchor) && !ROUTE_SITE_PREPOSITIONS.has(anchor)) continue;
+    const maxSiteEnd = Math.min(searchEnd, anchorIndex + 6);
+    for (let siteEnd = anchorIndex + 2; siteEnd <= maxSiteEnd; siteEnd += 1) {
+      const siteText = parts
+        .slice(anchorIndex + 1, siteEnd)
+        .map((part) => part.original)
+        .join(" ")
+        .trim();
+      if (!siteText) continue;
+      const resolved = resolveBodySitePhrase(siteText, options?.siteCodeMap, {
+        bodySiteContext: options?.context?.bodySiteContext,
+        allowTerminalModifierInheritance: true
+      });
+      if (resolved?.coding || resolved?.definition) return true;
+    }
+  }
+  return false;
+}
+
+function instructionQuantityUnitAt(
+  parts: Lexeme[],
+  start: number,
+  endExclusive: number,
+  options?: ParseOptions
+): InstructionQuantityUnitMatch | undefined {
+  const maxSpan = Math.min(3, endExclusive - start);
+  for (let span = maxSpan; span >= 1; span -= 1) {
+    const candidate = parts.slice(start, start + span).map((part) => key(part)).join(" ");
+    const unit = normalizeUnit(candidate, options);
+    if (unit) return { unit, endExclusive: start + span };
+  }
+  const head = key(parts[start]);
+  for (const compound of COMPOUND_DOSE_UNITS) {
+    if (compound.head !== head || !compound.requiresProductContext || compound.tails.length) continue;
+    const hasProductContext = instructionQuantityHasProductContext(parts, start + 1, endExclusive);
+    const hasRequiredSiteContext = !compound.requiresSiteContext ||
+      instructionQuantityHasResolvedSiteContext(parts, endExclusive, options);
+    if (hasProductContext && hasRequiredSiteContext) {
+      return { unit: compound.unit, endExclusive: start + 1 };
+    }
+  }
+  return undefined;
+}
+
 function parseQuantityArgument(
   parts: Lexeme[],
   start: number,
@@ -400,16 +566,18 @@ function parseQuantityArgument(
 ): AdviceArgument | undefined {
   for (let index = start; index + 1 < endExclusive; index += 1) {
     const valueToken = parts[index];
-    const unitToken = parts[index + 1];
-    if (!valueToken || !unitToken) continue;
-    const unit = normalizeUnit(key(unitToken), options);
-    if (!unit) continue;
+    if (!valueToken) continue;
+    const unitMatch = instructionQuantityUnitAt(parts, index + 1, endExclusive, options);
+    if (!unitMatch) continue;
+    const unitToken = parts[unitMatch.endExclusive - 1];
+    if (!unitToken) continue;
+    const unit = unitMatch.unit;
     const wordValue = INSTRUCTION_NUMBER_WORDS[key(valueToken)];
     if ((valueToken.kind === "NUMBER" && valueToken.value !== undefined) || wordValue !== undefined) {
       const value = valueToken.kind === "NUMBER" ? valueToken.value : wordValue;
       return {
         role: AdviceArgumentRole.Amount,
-        text: sourceFor(parts, index, index + 2, input),
+        text: sourceFor(parts, index, unitMatch.endExclusive, input),
         normalized: unit,
         quantity: { value, unit },
         span: { start: offset + valueToken.sourceStart, end: offset + unitToken.sourceEnd }
@@ -420,7 +588,7 @@ function parseQuantityArgument(
       if (!match) continue;
       return {
         role: AdviceArgumentRole.Amount,
-        text: sourceFor(parts, index, index + 2, input),
+        text: sourceFor(parts, index, unitMatch.endExclusive, input),
         normalized: unit,
         quantity: { range: { low: Number(match[1]), high: Number(match[2]) }, unit },
         span: { start: offset + valueToken.sourceStart, end: offset + unitToken.sourceEnd }
@@ -671,12 +839,36 @@ const OBJECT_AMOUNT_MATERIAL_ARGUMENT_PARSER: ActionArgumentParser = (c) => {
     if (objectEnd > argumentStart) pushArgument(args,
       argumentFromParts(parts, argumentStart, objectEnd, input, AdviceArgumentRole.Object, options));
   }
-  const tailStart = amountIndex !== undefined ? Math.min(segmentEnd, amountIndex + 2)
+  const amountEnd = amount?.span
+    ? partIndexAfterAbsoluteSourceEnd(parts, amount.span.end, offset)
+    : undefined;
+  const tailStart = amountEnd !== undefined ? Math.min(segmentEnd, amountEnd)
     : relIndex >= 0 ? relIndex + 1 : segmentEnd;
   if (tailStart < segmentEnd) {
     const tail = argumentFromParts(parts, tailStart, segmentEnd, input, AdviceArgumentRole.Material, options);
     if (relationHasGrammarFeature(relation, "accompanimentComplement") || tail?.conceptId) pushArgument(args, tail);
   }
+  return { args };
+};
+const AMOUNT_MATERIAL_DESTINATION_ARGUMENT_PARSER: ActionArgumentParser = (c) => {
+  const { parts, argumentStart, segmentEnd, input, offset, options, relIndex, amount } = c;
+  const args = parsedArgs(amount);
+  const amountEnd = amount?.span
+    ? partIndexAfterAbsoluteSourceEnd(parts, amount.span.end, offset)
+    : undefined;
+  let materialStart = amountEnd ?? argumentStart;
+  while (materialStart < segmentEnd) {
+    const lower = key(parts[materialStart]);
+    if (lower === "of" || lower === "a" || lower === "an" || lower === "the") materialStart += 1;
+    else break;
+  }
+  const materialEnd = relIndex >= materialStart ? relIndex : segmentEnd;
+  if (materialStart < materialEnd) pushArgument(args, argumentFromParts(
+    parts, materialStart, materialEnd, input, AdviceArgumentRole.Material, options
+  ));
+  if (relIndex >= 0 && relIndex + 1 < segmentEnd) pushArgument(args, argumentFromParts(
+    parts, relIndex + 1, segmentEnd, input, AdviceArgumentRole.Destination, options
+  ));
   return { args };
 };
 const AMOUNT_DURATION_ARGUMENT_PARSER: ActionArgumentParser = (c) => {
@@ -721,7 +913,7 @@ function quantifiedEntityArgument(
   let entity: AdviceArgument | undefined;
   if (quantity?.span) {
     const quantityStart = partIndexForAbsoluteSourceStart(parts, quantity.span.start, offset);
-    const quantityEnd = quantityStart !== undefined ? quantityStart + 2 : undefined;
+    const quantityEnd = partIndexAfterAbsoluteSourceEnd(parts, quantity.span.end, offset);
     if (quantityStart !== undefined && quantityStart > start) {
       entity = argumentFromParts(parts, start, quantityStart, input, role, options);
     }
@@ -739,8 +931,11 @@ function quantifiedEntityArgument(
     text,
     normalized: quantity?.quantity?.unit ?? text.toLowerCase()
   };
-  if (sourceEntityText && /[\u0E00-\u0E7F]/u.test(sourceEntityText)) {
-    result.i18n = { ...(result.i18n ?? {}), th: sourceEntityText };
+  if (sourceEntityText) {
+    const sourceLocale = inferMedicationLocale(sourceEntityText, "en");
+    if (sourceLocale !== "en") {
+      result.i18n = { ...(result.i18n ?? {}), [sourceLocale]: sourceEntityText };
+    }
   }
   result.role = role;
   result.text = text;
@@ -937,6 +1132,7 @@ const ACTION_ARGUMENT_PARSERS: Record<MedicationInstructionActionArgumentParser,
   "container-activity": CONTAINER_ACTIVITY_ARGUMENT_PARSER,
   "theme-destination-amount": THEME_DESTINATION_AMOUNT_ARGUMENT_PARSER,
   "object-amount-material": OBJECT_AMOUNT_MATERIAL_ARGUMENT_PARSER,
+  "amount-material-destination": AMOUNT_MATERIAL_DESTINATION_ARGUMENT_PARSER,
   "amount-duration": AMOUNT_DURATION_ARGUMENT_PARSER,
   "object-duration": OBJECT_DURATION_ARGUMENT_PARSER,
   "object-time": OBJECT_TIME_ARGUMENT_PARSER,
@@ -1065,15 +1261,7 @@ function buildActionFrame(
       display: definition.display,
       i18n: definition.i18n ? { ...definition.i18n } : undefined,
       realizer: definition.realizer,
-      realizerConfig: definition.realizerConfig ? {
-        ...definition.realizerConfig,
-        thaiSuppressActivityConcepts: definition.realizerConfig.thaiSuppressActivityConcepts
-          ? [...definition.realizerConfig.thaiSuppressActivityConcepts]
-          : undefined,
-        thaiSuppressSiteConcepts: definition.realizerConfig.thaiSuppressSiteConcepts
-          ? [...definition.realizerConfig.thaiSuppressSiteConcepts]
-          : undefined
-      } : undefined,
+      realizerConfig: cloneMedicationInstructionActionRealizerConfig(definition.realizerConfig),
       codings
     },
     relation: frameRelation,
@@ -1262,7 +1450,8 @@ function actionTailIsRegimenModifier(
   parts: Lexeme[],
   actionStart: number,
   index: number,
-  definition: ActionDefinition | undefined
+  definition: ActionDefinition | undefined,
+  options?: ParseOptions
 ): boolean {
   const token = key(parts[index]);
   if (!token) return false;
@@ -1270,14 +1459,22 @@ function actionTailIsRegimenModifier(
     return true;
   }
   if (ACTION_ROUTE_TAIL_SURFACES.has(token)) return true;
-  const timing = Boolean(
+  const previous = parts[index - 1];
+  const previousValue = previous
+    ? previous.kind === "NUMBER" || previous.kind === "NUMBER_RANGE" ||
+      INSTRUCTION_NUMBER_WORDS[key(previous)] !== undefined
+    : false;
+  const localAmountUnit = definition?.acceptsAmount && previousValue
+    ? instructionQuantityUnitAt(parts, index, parts.length, options)
+    : undefined;
+  const timing = !localAmountUnit && Boolean(
     TIMING_ABBREVIATIONS[token] ||
     WORD_FREQUENCIES[token] ||
     EVENT_TIMING_TOKENS[token] ||
+    EVERY_INTERVAL_TOKENS.has(token) ||
     FREQUENCY_SIMPLE_WORDS[token] !== undefined
   );
   if (!timing) {
-    const previous = parts[index - 1];
     if (!previous || !/^[,;:]$/u.test(previous.original.trim())) return false;
     const relation = resolveActionRelationSurface(token);
     if (!relation) return false;
@@ -1308,7 +1505,11 @@ export function parseInstructionActions(
         negative = prefixed.polarity === AdvicePolarity.Negate;
         break;
       }
-      if (actionMatchAt(parts, index, options) && !actionCandidateIsDoseUnit(parts, index, options)) {
+      if (
+        actionMatchAt(parts, index, options) &&
+        !actionCandidateIsDoseUnit(parts, index, options) &&
+        !actionCandidateIsAnchoredSiteModifier(parts, index, options)
+      ) {
         start = index;
         break;
       }
@@ -1321,7 +1522,7 @@ export function parseInstructionActions(
     let end = parts.length;
     for (let index = actionStart + (startingMatch?.length ?? 1); index < parts.length; index += 1) {
       const currentKey = key(parts.slice(index, index + 1)[0]);
-      if (actionTailIsRegimenModifier(parts, actionStart, index, startingMatch?.definition)) {
+      if (actionTailIsRegimenModifier(parts, actionStart, index, startingMatch?.definition, options)) {
         end = index;
         break;
       }
@@ -1353,6 +1554,7 @@ export function parseInstructionActions(
       if (
         nextActionMatch &&
         !actionCandidateIsDoseUnit(parts, index, options) &&
+        !actionCandidateIsAnchoredSiteModifier(parts, index, options) &&
         !actionCandidateBelongsToCurrentFrame(parts, index, startingMatch?.definition, options)
       ) {
         const previousKey = key(parts.slice(index - 1, index)[0]);
@@ -1489,13 +1691,28 @@ function opaqueTextIsMeaningful(text: string): boolean {
   return !tokens.length || !tokens.every((token) => REDUNDANT_OPAQUE_TOKENS.has(token));
 }
 
+function leadingStructuralConnectorLength(text: string): number {
+  let consumed = 0;
+  for (const token of lexInput(text)) {
+    if (token.sourceStart > consumed && text.slice(consumed, token.sourceStart).trim()) break;
+    const canonical = key(token);
+    if (!(
+      ACTION_SEQUENCE_MARKERS.has(canonical) ||
+      ACTION_SEQUENCE_RELATION_TOKENS.has(canonical) ||
+      ACTION_COORDINATION_CONNECTORS.has(canonical)
+    )) break;
+    consumed = token.sourceEnd;
+  }
+  return consumed;
+}
+
 function trimOpaqueSpan(input: string, start: number, end: number): CanonicalSourceSpan | undefined {
   while (start < end && /[\s,;:.()]/.test(input[start] ?? "")) start += 1;
   while (end > start && /[\s,;:.()]/.test(input[end - 1] ?? "")) end -= 1;
   if (end <= start) return undefined;
-  const leading = input.slice(start, end).match(/^(?:(?:and|or|then)\b\s*|(?:และ|หรือ|จากนั้น|แล้ว)\s*)/iu);
-  if (leading?.[0]) {
-    start += leading[0].length;
+  const leadingLength = leadingStructuralConnectorLength(input.slice(start, end));
+  if (leadingLength > 0) {
+    start += leadingLength;
     while (start < end && /[\s,;:.()]/.test(input[start] ?? "")) start += 1;
   }
   if (end <= start) return undefined;
@@ -2137,7 +2354,7 @@ export function buildInstructionGraph(
     primaryAdministrationSpan,
     opaqueSpans: reconciledOpaque.length ? reconciledOpaque : undefined,
     sourceText: input,
-    sourceLocale: /[\u0E00-\u0E7F]/.test(input) ? "th" : "en"
+    sourceLocale: baseLanguageTag(options?.locale) ?? inferMedicationLocale(input, "en")
   };
   const hpsgConditionRelations = conditionRelationsFromHpsgEvidence(clause, input, actions);
   graph.relations = hpsgConditionRelations.length ? hpsgConditionRelations : undefined;
@@ -2149,11 +2366,11 @@ function translatedQuantity(
   quantity: NonNullable<AdviceArgument["quantity"]>,
   locale: string
 ): string {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
   const singular = quantity.value === 1 && !quantity.range;
   const labels = quantity.unit ? INSTRUCTION_QUANTITY_UNIT_LABELS.get(quantity.unit) : undefined;
-  const unit = labels
-    ? (language === "th" ? labels.th : singular ? labels.enOne : labels.enOther)
+  const localizedLabels = labels ? localizedConfig(labels.locales, locale, "en") : undefined;
+  const unit = localizedLabels
+    ? (singular ? localizedLabels.one : localizedLabels.other)
     : (quantity.unit ?? "");
   if (quantity.range) {
     return `${quantity.range.low ?? ""}-${quantity.range.high ?? ""} ${unit}`.trim();
@@ -2161,23 +2378,7 @@ function translatedQuantity(
   return `${quantity.value ?? ""} ${unit}`.trim();
 }
 
-const GRAPH_TIME_ARGUMENT_I18N: Partial<Record<EventTiming, { en: string; th: string }>> = {
-  [EventTiming.Meal]: { en: "food", th: "อาหาร" },
-  [EventTiming.Breakfast]: { en: "breakfast", th: "อาหารเช้า" },
-  [EventTiming.Lunch]: { en: "lunch", th: "อาหารกลางวัน" },
-  [EventTiming.Dinner]: { en: "dinner", th: "อาหารเย็น" },
-  [EventTiming["Before Sleep"]]: { en: "sleep", th: "นอน" },
-  [EventTiming.Wake]: { en: "waking", th: "ตื่นนอน" },
-  [EventTiming.Morning]: { en: "the morning", th: "ตอนเช้า" },
-  [EventTiming.Noon]: { en: "noon", th: "ตอนเที่ยง" },
-  [EventTiming.Afternoon]: { en: "the afternoon", th: "ตอนบ่าย" },
-  [EventTiming.Evening]: { en: "the evening", th: "ตอนเย็น" },
-  [EventTiming.Night]: { en: "night", th: "ตอนกลางคืน" },
-  [EventTiming.Immediate]: { en: "immediately", th: "ทันที" }
-};
-
 function translatedArgument(arg: AdviceArgument, locale: string): string {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
   if (arg.quantity) return translatedQuantity(arg.quantity, locale);
   const looseQuantity = (arg.text ?? arg.normalized ?? "").trim().match(/^([0-9]+(?:\.[0-9]+)?)\s+(.+)$/u);
   if (looseQuantity) {
@@ -2185,59 +2386,42 @@ function translatedArgument(arg: AdviceArgument, locale: string): string {
     if (unit) return translatedQuantity({ value: Number(looseQuantity[1]), unit }, locale);
   }
   if (arg.role === AdviceArgumentRole.Time && arg.normalized) {
-    const localized = GRAPH_TIME_ARGUMENT_I18N[arg.normalized as EventTiming];
-    if (localized) return localized[language];
+    const localized = localizedTimeArgument(arg.normalized, locale);
+    if (localized) return localized;
   }
-  const localizedArgument = arg.i18n?.[language];
-  if (localizedArgument) return localizedArgument;
+  const direct = localizedValue(arg.i18n, locale);
+  if (direct) return direct;
   if (arg.role === AdviceArgumentRole.Activity && arg.normalized) {
     const action = resolveMedicationInstructionAction(arg.normalized);
     if (action) {
-      if (language === "th") return action.i18n?.th ?? arg.text;
-      if (!/[\u0E00-\u0E7F]/u.test(arg.text)) return arg.text;
-      return action.display.charAt(0).toLowerCase() + action.display.slice(1);
+      const sourceLocale = inferMedicationLocale(arg.text, "en");
+      const targetLocale = baseLanguageTag(locale) ?? locale.toLowerCase();
+      if (sourceLocale === targetLocale) return arg.text;
+      const localizedAction = localizedValue(action.i18n, locale);
+      if (localizedAction) return localizedAction;
+      const display = action.display.trim();
+      return display ? display.charAt(0).toLowerCase() + display.slice(1) : arg.text;
     }
   }
   return arg.normalized ?? arg.text;
 }
 
 function translatedArgumentConcept(arg: AdviceArgument, locale: string): string {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
-  return arg.i18n?.[language] ?? arg.normalized ?? arg.text;
+  return localizedValue(arg.i18n, locale) ?? arg.normalized ?? arg.text;
 }
 
 function actionLabel(frame: AdviceFrame, locale: string, roundtripSafe = false): string {
-  const language = locale.toLowerCase().startsWith("th") ? "th" : "en";
   const definition = getMedicationInstructionAction(frame.predicate.lemma);
-  return (roundtripSafe ? definition?.roundtripI18n?.[language] : undefined) ??
-    frame.predicate.i18n?.[language] ??
-    (language === "en" ? frame.predicate.display : undefined) ??
-    definition?.i18n?.[language] ??
-    definition?.display ??
+  return (roundtripSafe ? localizedValue(definition?.roundtripI18n, locale) : undefined) ??
+    localizedValue(frame.predicate.i18n, locale) ??
+    localizedValue(definition?.i18n, locale) ??
     frame.predicate.display ??
+    definition?.display ??
     frame.predicate.lemma;
 }
 
-interface ActionRealizationContext {
-  frame: AdviceFrame;
-  locale: string;
-  thai: boolean;
-  label: string;
-  amount?: string;
-  theme?: string;
-  container?: string;
-  destination?: string;
-  site?: string;
-  substance?: string;
-  result?: string;
-  activity?: string;
-  time?: string;
-  duration?: string;
-  material?: string;
-  manner?: string;
-  realizerConfig?: MedicationInstructionActionDefinition["realizerConfig"];
-  definition?: ActionDefinition;
-}
+type ActionRealizationContext = InstructionActionRealizationInput;
+
 type ActionRealizer = (context: ActionRealizationContext) => string;
 const DEFAULT_ACTION_REALIZER: ActionRealizer = (c) => {
   const objectArgs = c.frame.args.filter((arg) =>
@@ -2252,6 +2436,17 @@ const DEFAULT_ACTION_REALIZER: ActionRealizer = (c) => {
   const amount = objectSource && amountSource && objectSource.includes(amountSource)
     ? undefined
     : c.amount;
+  const profile = localeRealizationProfile(c.locale);
+  const appendLocale = (base: string, value: string | undefined): string =>
+    value ? `${base}${base ? profile.tokenSeparator : ""}${value}` : base;
+  const appendQuantity = (base: string, value: string | undefined): string =>
+    value ? `${base}${base ? profile.quantitySeparator : ""}${value}` : base;
+  const appendDuration = (base: string, value: string | undefined): string => {
+    if (!value) return base;
+    const phrase = joinLocalizedTokens(c.locale, [profile.durationPrefix || undefined, value]);
+    return `${base}${base ? profile.quantitySeparator : ""}${phrase}`;
+  };
+
   const relationTargetArg = objectArgs.length > 1 ? objectArgs[1] : undefined;
   const relationTarget = relationTargetArg ? translatedArgument(relationTargetArg, c.locale) : undefined;
   const withTarget = relationHasGrammarFeature(c.frame.relation, "accompanimentComplement")
@@ -2260,276 +2455,78 @@ const DEFAULT_ACTION_REALIZER: ActionRealizer = (c) => {
   const activityRelation = c.activity && relationHasGrammarFeature(c.frame.relation, "activityFallback")
     ? localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation
     : undefined;
-  const activitySuffix = activityRelation && c.activity
-    ? (c.thai ? `${activityRelation}${c.activity}` : ` ${activityRelation} ${c.activity}`)
-    : "";
-  return c.thai
-    ? `${c.label}${object ?? ""}${amount ? ` ${amount}` : ""}${c.duration ? ` ${c.duration}` : ""}${withTarget ? `ร่วมกับ${withTarget}` : ""}${activitySuffix}`
-    : `${c.label}${object ? ` ${object}` : ""}${amount ? ` ${amount}` : ""}${c.duration ? ` for ${c.duration}` : ""}${withTarget ? ` with ${withTarget}` : ""}${activitySuffix}`;
-};
-const SOURCE_FAITHFUL_REALIZER: ActionRealizer = (c) => {
-  const sourceIsThai = /[\u0E00-\u0E7F]/.test(c.frame.sourceText);
-  if (c.thai === sourceIsThai) {
-    const text = c.frame.sourceText.trim();
-    return c.thai ? text : (text ? text.charAt(0).toUpperCase() + text.slice(1) : c.label);
-  }
-  return c.thai ? "ปรับการใช้ตามอาการ" : "Adjust use according to symptoms";
-};
-const CONTAINER_ACTIVITY_REALIZER: ActionRealizer = (c) => {
-  const container = c.container ?? c.theme;
-  return c.thai
-    ? `${c.label}${container ?? ""}${c.activity ? `ก่อน${c.activity}` : ""}`
-    : `${c.label}${container ? ` ${container}` : ""}${c.activity ? ` before ${c.activity}` : ""}`;
-};
-const THEME_DESTINATION_AMOUNT_REALIZER: ActionRealizer = (c) => c.thai
-  ? `${c.label}${c.theme ?? ""}${c.destination ? `ลง${c.destination}` : ""}${c.amount ? ` ${c.amount}` : ""}`
-  : `${c.label}${c.theme ? ` ${c.theme}` : ""}${c.amount ? ` ${c.amount}` : ""}${c.destination ? ` into ${c.destination}` : ""}`;
-const MIX_SUBSTANCE_REALIZER: ActionRealizer = (c) => {
-  const themeArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Theme);
-  const substanceArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Substance);
-  const theme = themeArg ? translatedArgumentConcept(themeArg, c.locale) : undefined;
-  const substance = substanceArg ? translatedArgumentConcept(substanceArg, c.locale) : c.substance;
-  const themeAmount = themeArg?.quantity ? translatedQuantity(themeArg.quantity, c.locale) : undefined;
-  const amountArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Amount);
-  const substanceAmount = substanceArg?.quantity
-    ? translatedQuantity(substanceArg.quantity, c.locale)
-    : c.amount;
-  if (c.thai) {
-    const themeText = theme ? `${theme}${themeAmount ? ` ${themeAmount}` : ""}` : "";
-    const amountSeparator = substanceArg?.quantity ? " " : amountArg?.conceptId ? "" : " ";
-    const substanceText = substance
-      ? `${themeText ? "กับ" : ""}${substance}${substanceAmount ? `${amountSeparator}${substanceAmount}` : ""}`
-      : "";
-    return `${c.label}${themeText}${substanceText}`;
-  }
-  const themeText = theme
-    ? ` ${themeAmount ? `${themeAmount} of ` : ""}${theme}`
-    : "";
-  const substanceAmountText = substanceAmount
-    ? `${substanceAmount}${amountArg?.conceptId && !substanceArg?.quantity ? " of " : " "}`
-    : "";
-  const substanceText = substance
-    ? ` with ${substanceAmountText}${substance}`
-    : "";
-  return `${c.label}${themeText}${substanceText}`;
-};
-const RESULT_REALIZER: ActionRealizer = (c) => c.thai
-  ? `${c.label}${c.result ? `ให้เกิด${c.result}` : ""}`
-  : `${c.label}${c.result ? ` to form ${c.result}` : ""}`;
-const SITE_RELATION_REALIZER: ActionRealizer = (c) => {
-  const relationTarget = c.time ?? c.activity;
-  const mannerSuffix = c.manner ? (c.thai ? c.manner : ` ${c.manner}`) : "";
-  if (relationTarget) {
-    const siteArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Site);
-    const suppressThaiSite = Boolean(
-      c.thai && siteArg?.conceptId &&
-      (c.realizerConfig?.thaiSuppressSiteConcepts?.indexOf(siteArg.conceptId) ?? -1) !== -1
-    );
-    const target = c.site && !suppressThaiSite ? (c.thai ? c.site : ` ${c.site}`) : "";
-    if (c.time && relationHasGrammarFeature(c.frame.relation, "directTimeRealization")) {
-      if (c.thai) {
-        const timePhrase = c.time === "กลางคืน" ? "ตอนกลางคืน"
-          : c.time === "นอน" || c.time === "bedtime" ? "ก่อนนอน"
-            : c.time;
-        return `${c.label}${target}${mannerSuffix}${timePhrase}`;
-      }
-      const lower = c.time.toLowerCase();
-      const timePhrase = lower === "night" ? "at night"
-        : lower === "bed" || lower === "bedtime" || lower === "sleep" ? "at bedtime"
-          : /^(?:the )?(?:morning|afternoon|evening)$/.test(lower)
-            ? `in ${lower.startsWith("the ") ? lower : `the ${lower}`}`
-            : `at ${c.time}`;
-      return `${c.label}${target}${mannerSuffix} ${timePhrase}`;
-    }
-    const semanticRelation = c.frame.relation ??
-      getUniqueAdviceRelationByGrammarFeature("defaultSiteRelation") ??
-      (() => { throw new Error("Missing declarative default site relation"); })();
-    const relationProfile = getAdviceRelationDefinition(semanticRelation)?.grammar.timeRealizationProfile ?? "default";
-    const relationText = localizeAdviceRelation(semanticRelation, c.locale, relationProfile) ?? semanticRelation;
-    return c.thai
-      ? `${c.label}${target}${mannerSuffix}${relationText}${relationTarget}`
-      : `${c.label}${target}${mannerSuffix} ${relationText} ${relationTarget}`;
-  }
-  const resultSuffix = c.result
-    ? (c.thai ? `ให้${c.result}` : ` until ${c.result}`)
-    : "";
-  if (c.site) return c.thai
-    ? `${c.label}${c.site}${mannerSuffix}${c.substance ? `ด้วย${c.substance}` : ""}${resultSuffix}`
-    : `${c.label} ${c.site}${mannerSuffix}${c.substance ? ` with ${c.substance}` : ""}${resultSuffix}`;
-  return c.thai
-    ? `${c.label}${mannerSuffix}${c.substance ? `ด้วย${c.substance}` : ""}${resultSuffix}`
-    : `${c.label}${mannerSuffix}${c.substance ? ` with ${c.substance}` : ""}${resultSuffix}`;
-};
-const OBJECT_AMOUNT_MATERIAL_REALIZER: ActionRealizer = (c) => {
-  const object = c.theme ?? c.container;
-  return c.thai
-    ? `${c.label}${object ?? ""}${c.amount ? ` ${c.amount}` : ""}${c.material ? `ด้วย${c.material}` : ""}`
-    : `${c.label}${object ? ` ${object}` : ""}${c.amount ? ` ${c.amount}` : ""}${c.material ? ` with ${c.material}` : ""}`;
-};
-const PRIME_REALIZER: ActionRealizer = (c) => {
-  const object = c.theme ?? c.container;
-  const fallback = c.realizerConfig?.thaiFallbackObject ?? "";
-  return c.thai
-    ? `${c.label}${object ?? fallback}${c.amount ? ` ${c.amount}` : ""}${c.material ? ` ${c.material}` : ""}`
-    : `${c.label}${object ? ` ${object}` : ""}${c.amount ? ` with ${c.amount}` : ""}${c.material ? ` ${c.material}` : ""}`;
-};
-const AMOUNT_DURATION_REALIZER: ActionRealizer = (c) => {
-  const relationTarget = c.activity;
-  const relation = relationHasGrammarFeature(c.frame.relation, "activityFallback")
-    ? localizeAdviceRelation(c.frame.relation, c.locale)
+  const activityPhrase = activityRelation && c.activity
+    ? joinLocalizedTokens(c.locale, [activityRelation, c.activity])
     : undefined;
-  const base = c.thai
-    ? `${c.label}${c.amount ? ` ${c.amount}` : ""}${c.duration ? ` นาน ${c.duration}` : ""}`
-    : `${c.label}${c.amount ? ` ${c.amount}` : ""}${c.duration ? ` for ${c.duration}` : ""}`;
-  if (!relation || !relationTarget) return base;
-  return c.thai ? `${base}${relation}${relationTarget}` : `${base} ${relation} ${relationTarget}`;
-};
-const OBJECT_DURATION_REALIZER: ActionRealizer = (c) => {
-  const object = c.theme ?? c.site;
-  return c.thai
-    ? `${c.label}${object ?? ""}${c.duration ? ` ${c.duration}` : ""}`
-    : `${c.label}${object ? ` ${object}` : ""}${c.duration ? ` for ${c.duration}` : ""}`;
-};
-const OBJECT_TIME_REALIZER: ActionRealizer = (c) => {
-  const object = c.theme ?? c.site;
-  if (c.thai) return `${c.label}${object ?? ""}${c.time ?? ""}`;
-  return `${c.label}${object ? ` ${object}` : ""}${c.time ? ` in ${c.time}` : ""}`;
-};
-const SEPARABLE_OBJECT_RELATION_REALIZER: ActionRealizer = (c) => {
-  const object = c.theme ?? c.site;
-  const alias = c.definition?.separableAliases?.find((candidate) =>
-    c.thai ? /[\u0E00-\u0E7F]/u.test(candidate.lead + candidate.particle) : !/[\u0E00-\u0E7F]/u.test(candidate.lead + candidate.particle)
-  );
-  if (!alias) return RELATION_DURATION_REALIZER(c);
-  const target = c.duration ?? c.time ?? c.activity;
-  const relationSurface = relationHasGrammarFeature(c.frame.relation, "activityFallback")
-    ? localizeAdviceRelation(c.frame.relation, c.locale) ?? ""
-    : "";
-  const relationText = relationSurface
-    ? c.thai ? relationSurface : ` ${relationSurface} `
-    : "";
-  return c.thai
-    ? `${alias.lead}${object ?? ""}${alias.particle}${target ? `${relationText}${target}` : ""}`
-    : `${alias.lead}${object ? ` ${object}` : ""} ${alias.particle}${target ? `${relationText}${target}` : ""}`;
-};
-const RELATION_DURATION_REALIZER: ActionRealizer = (c) => {
-  const object = c.amount ?? c.theme ?? c.site;
-  const target = c.duration ?? c.time ?? c.activity;
-  const thaiObject = object ? (/^[0-9A-Za-z]/u.test(object) ? ` ${object}` : object) : "";
-  const thaiTarget = target && /^[0-9A-Za-z]/u.test(target) ? ` ${target}` : target;
-  if (target && relationHasGrammarFeature(c.frame.relation, "activityFallback")) {
-    const relation = localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation;
-    return c.thai
-      ? `${c.label}${thaiObject}${relation}${thaiTarget}`
-      : `${c.label}${object ? ` ${object}` : ""} ${relation} ${target}`;
+  const locativeRelation = c.site && c.frame.relation && relationHasSemanticClass(c.frame.relation, "locative")
+    ? localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation
+    : undefined;
+  const resultRelation = c.result && c.frame.relation
+    ? localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation
+    : undefined;
+  const resultPhrase = c.result && resultRelation
+    ? joinLocalizedTokens(c.locale, [resultRelation, c.result])
+    : undefined;
+
+  let text = appendLocale(c.label, object);
+  text = appendQuantity(text, amount);
+  text = appendLocale(text, c.manner);
+
+  if (locativeRelation && c.site) {
+    // The site is already part of `object`; rebuild from the label so the relation
+    // controls attachment rather than duplicating the site.
+    text = appendQuantity(c.label, amount);
+    text = appendLocale(text, c.manner);
+    text = appendLocale(text, joinLocalizedTokens(c.locale, [locativeRelation, c.site]));
   }
-  return c.thai ? `${c.label}${thaiObject}` : `${c.label}${object ? ` ${object}` : ""}`;
-};
-const LEAVE_DURATION_REALIZER: ActionRealizer = (c) => {
-  const durationArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Duration);
-  if (durationArg?.conceptId === "overnight" && c.duration) {
-    return c.thai ? `${c.label}${c.duration}` : `${c.label} on ${c.duration}`;
+
+  text = appendDuration(text, c.duration);
+  if (withTarget) {
+    const withRelation = localizeAdviceRelation(AdviceRelation.With, c.locale, "complement") ?? AdviceRelation.With;
+    text = appendLocale(text, joinLocalizedTokens(c.locale, [withRelation, withTarget]));
   }
-  return c.thai
-    ? `${c.label}${c.duration ? ` ${c.duration}` : ""}`
-    : `${c.label} on${c.duration ? ` for ${c.duration}` : ""}`;
+  text = appendLocale(text, activityPhrase);
+  text = appendLocale(text, resultPhrase);
+  return text;
 };
-const DURATION_REALIZER: ActionRealizer = (c) => c.thai
-  ? `${c.label}${c.duration ? ` ${c.duration}` : ""}`
-  : `${c.label}${c.duration ? ` for ${c.duration}` : ""}`;
-const DURATION_ACTIVITY_REALIZER: ActionRealizer = (c) => {
-  const target = c.activity ?? c.result;
-  if (!target) return `${c.label}${c.duration ? ` ${c.duration}` : ""}`;
-  if (c.frame.relation) {
-    const relation = localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation;
-    if (relationHasSemanticClass(c.frame.relation, "interval")) {
-      return c.thai
-        ? `${c.label}${c.duration ? ` ${c.duration}` : ""} ${relation}${target}`
-        : `${c.label}${c.duration ? ` ${c.duration}` : ""} ${relation} ${target}`;
-    }
-    return c.thai
-      ? `${c.label}${c.duration ? ` ${c.duration}` : ""}${relation}${target}`
-      : `${c.label}${c.duration ? ` ${c.duration}` : ""} ${relation} ${target}`;
+const RESULT_REALIZER: ActionRealizer = (c) => {
+  const profile = localeRealizationProfile(c.locale);
+  let text = joinLocalizedTokens(c.locale, [c.label, c.manner]);
+  if (c.result) {
+    text = joinLocalizedTokens(c.locale, [
+      text,
+      joinLocalizedTokens(c.locale, [profile.resultFormationPrefix, c.result])
+    ]);
   }
-  return `${c.label}${c.duration ? ` ${c.duration}` : ""} ${target}`;
-};
-const ACTIVITY_REALIZER: ActionRealizer = (c) => {
-  const activityArg = c.frame.args.find((arg) => arg.role === AdviceArgumentRole.Activity);
-  const suppressThaiActivity = Boolean(
-    c.thai && activityArg?.conceptId &&
-    (c.realizerConfig?.thaiSuppressActivityConcepts?.indexOf(activityArg.conceptId) ?? -1) !== -1
-  );
-  const base = c.thai
-    ? (suppressThaiActivity || !c.activity ? c.label : `${c.label}${c.activity}`)
-    : `${c.label}${c.activity ? ` ${c.activity}` : ""}`;
-  if (!c.duration) return base;
-  return c.thai ? `${base}เป็นเวลา ${c.duration}` : `${base} for ${c.duration}`;
-};
-const THAI_NEGATED_MODALITY_PREFIX: Partial<Record<AdviceModality, string>> = {
-  [AdviceModality.Should]: "ไม่ควร",
-  [AdviceModality.Must]: "ห้าม"
-};
-const ENGLISH_NEGATED_MODALITY_PREFIX: Partial<Record<AdviceModality, string>> = {
-  [AdviceModality.Should]: "Should not ",
-  [AdviceModality.Must]: "Must not "
+  return text;
 };
 
-function negatedActionPrefix(frame: AdviceFrame, thai: boolean): string {
-  if (thai) return (frame.modality && THAI_NEGATED_MODALITY_PREFIX[frame.modality]) ?? "ห้าม";
-  return (frame.modality && ENGLISH_NEGATED_MODALITY_PREFIX[frame.modality]) ?? "Do not ";
-}
-
-const THAI_POSITIVE_MODALITY_PREFIX: Partial<Record<AdviceModality, string>> = {
-  [AdviceModality.May]: "อาจ",
-  [AdviceModality.Can]: "สามารถ",
-  [AdviceModality.Might]: "อาจ",
-  [AdviceModality.Could]: "อาจ",
-  [AdviceModality.Should]: "ควร",
-  [AdviceModality.Must]: "ต้อง"
-};
-const ENGLISH_POSITIVE_MODALITY_PREFIX: Partial<Record<AdviceModality, string>> = {
-  [AdviceModality.May]: "May ",
-  [AdviceModality.Can]: "Can ",
-  [AdviceModality.Might]: "Might ",
-  [AdviceModality.Could]: "Could ",
-  [AdviceModality.Should]: "Should ",
-  [AdviceModality.Must]: "Must "
+const AMOUNT_MATERIAL_DESTINATION_REALIZER: ActionRealizer = (c) => {
+  const profile = localeRealizationProfile(c.locale);
+  const relation = c.destination && c.frame.relation
+    ? localizeAdviceRelation(c.frame.relation, c.locale) ?? c.frame.relation
+    : undefined;
+  const destination = relation && c.destination
+    ? joinLocalizedTokens(c.locale, [relation, c.destination])
+    : undefined;
+  const material = c.material
+    ? joinLocalizedTokens(c.locale, [profile.materialPrefix || undefined, c.material])
+    : undefined;
+  return renderLocaleTemplate(profile.amountMaterialDestinationTemplate, {
+    label: c.label,
+    amount: c.amount,
+    material,
+    destination: destination ? `${profile.tokenSeparator}${destination}` : undefined
+  });
 };
 
-function applyPositiveActionModality(text: string, frame: AdviceFrame, thai: boolean): string {
-  if (!frame.modality) return text;
-  const prefix = thai
-    ? THAI_POSITIVE_MODALITY_PREFIX[frame.modality]
-    : ENGLISH_POSITIVE_MODALITY_PREFIX[frame.modality];
-  if (!prefix) return text;
-  const normalizedPrefix = prefix.trim().toLowerCase();
-  if (text.trim().toLowerCase().startsWith(normalizedPrefix)) return text;
-  return `${prefix}${thai ? text : text.charAt(0).toLowerCase() + text.slice(1)}`;
-}
-
-const ACTION_REALIZERS: Record<MedicationInstructionActionRealizer, ActionRealizer> = {
+const ACTION_REALIZERS: Partial<Record<MedicationInstructionActionRealizer, ActionRealizer>> = {
   default: DEFAULT_ACTION_REALIZER,
-  "source-faithful": SOURCE_FAITHFUL_REALIZER,
-  "container-activity": CONTAINER_ACTIVITY_REALIZER,
-  "theme-destination-amount": THEME_DESTINATION_AMOUNT_REALIZER,
-  "mix-substance": MIX_SUBSTANCE_REALIZER,
   result: RESULT_REALIZER,
-  "site-relation": SITE_RELATION_REALIZER,
-  "object-amount-material": OBJECT_AMOUNT_MATERIAL_REALIZER,
-  prime: PRIME_REALIZER,
-  "amount-duration": AMOUNT_DURATION_REALIZER,
-  "object-duration": OBJECT_DURATION_REALIZER,
-  "object-time": OBJECT_TIME_REALIZER,
-  "separable-object-relation": SEPARABLE_OBJECT_RELATION_REALIZER,
-  "relation-duration": RELATION_DURATION_REALIZER,
-  "leave-duration": LEAVE_DURATION_REALIZER,
-  duration: DURATION_REALIZER,
-  "duration-activity": DURATION_ACTIVITY_REALIZER,
-  activity: ACTIVITY_REALIZER
+  "amount-material-destination": AMOUNT_MATERIAL_DESTINATION_REALIZER
 };
 
 function realizeAction(frame: AdviceFrame, locale: string, roundtripSafe = false): string {
-  const thai = locale.toLowerCase().startsWith("th");
   const first = (role: AdviceArgumentRole): string | undefined => {
     const arg = frame.args.filter((candidate) => candidate.role === role).slice(0, 1)[0];
     return arg ? translatedArgument(arg, locale) : undefined;
@@ -2544,51 +2541,29 @@ function realizeAction(frame: AdviceFrame, locale: string, roundtripSafe = false
   const result = first(AdviceArgumentRole.Result);
   const activity = first(AdviceArgumentRole.Activity);
   const timeArg = frame.args.find((arg) => arg.role === AdviceArgumentRole.Time);
-  const time = timeArg
-    ? (thai && /[\u0E00-\u0E7F]/u.test(timeArg.text) ? timeArg.text : translatedArgument(timeArg, locale))
-    : undefined;
+  const time = timeArg ? translatedArgument(timeArg, locale) : undefined;
   const duration = first(AdviceArgumentRole.Duration);
   const material = first(AdviceArgumentRole.Material);
   const manner = first(AdviceArgumentRole.Manner);
-
-  if (frame.polarity === AdvicePolarity.Negate) {
-    const object = site ?? theme ?? substance ?? material;
-    const relationTarget = activity ?? time;
-    const prefix = negatedActionPrefix(frame, thai);
-    if (object && relationHasGrammarFeature(frame.relation, "negatedObjectAttachment")) {
-      const relationText = localizeAdviceRelation(frame.relation, locale) ?? frame.relation;
-      return thai
-        ? `${prefix}${label}${relationText}${object}`
-        : `${prefix}${label.toLowerCase()} ${relationText} ${object}`;
-    }
-    if (relationTarget && relationHasGrammarFeature(frame.relation, "negatedRelationTarget")) {
-      const relationText = localizeAdviceRelation(frame.relation, locale) ?? frame.relation;
-      return thai
-        ? `${prefix}${label}${object ?? ""}${relationText}${relationTarget}`
-        : `${prefix}${label.toLowerCase()}${object ? ` ${object}` : ""} ${relationText} ${relationTarget}`;
-    }
-    if (duration) {
-      const objectText = object ? (thai ? object : ` ${object}`) : "";
-      return thai
-        ? `${prefix}${label}${objectText}เป็นเวลา ${duration}`
-        : `${prefix}${label.toLowerCase()}${objectText} for ${duration}`;
-    }
-    const fallbackObject = object ?? relationTarget;
-    return thai
-      ? `${prefix}${label}${fallbackObject ?? ""}`
-      : `${prefix}${label.toLowerCase()}${fallbackObject ? ` ${fallbackObject}` : ""}`;
-  }
-
   const definition = getMedicationInstructionAction(frame.predicate.lemma);
-  const realizerKey = frame.predicate.realizer ?? definition?.realizer ?? "default";
-  const realizer = ACTION_REALIZERS[realizerKey] ?? DEFAULT_ACTION_REALIZER;
-  const realized = realizer({
-    frame, locale, thai, label, amount, theme, container, destination, site,
+  const input: InstructionActionRealizationInput = {
+    frame, locale, label, amount, theme, container, destination, site,
     substance, result, activity, time, duration, material, manner,
     realizerConfig: frame.predicate.realizerConfig ?? definition?.realizerConfig,
-    definition
-  });
-  return applyPositiveActionModality(realized, frame, thai);
+    definition,
+    translateArgumentConcept: (arg) => translatedArgumentConcept(arg, locale),
+    translateQuantity: (quantity) => translatedQuantity(quantity, locale)
+  };
+  const adapter = getInstructionActionLocaleAdapter(locale);
+  if (frame.polarity === AdvicePolarity.Negate) {
+    return adapter.renderNegated(input);
+  }
+  const realizerKey = frame.predicate.realizer ?? definition?.realizer ?? "default";
+  const genericRealizer = ACTION_REALIZERS[realizerKey];
+  const realized = genericRealizer
+    ? genericRealizer(input)
+    : adapter.render(realizerKey, input) ?? DEFAULT_ACTION_REALIZER(input);
+  return adapter.applyPositiveModality(realized, frame);
 }
 
 export function realizeInstructionAction(frame: AdviceFrame, locale = "en"): string {
@@ -2911,11 +2886,8 @@ function sourceTextCoversFrameMeaning(frame: AdviceFrame): boolean {
   });
 }
 
-function conditionRelationBody(text: string, kind: AdviceRelation): {
-  body: string;
-  persists: boolean;
-} | undefined {
-  const trimmed = text.trim();
+function conditionRelationBody(text: string, kind: AdviceRelation): string | undefined {
+  const trimmed = trimSemanticText(text);
   if (!trimmed) return undefined;
   let body = trimmed;
   if (!relationHasGrammarFeature(kind, "conditionScope")) return undefined;
@@ -2931,17 +2903,7 @@ function conditionRelationBody(text: string, kind: AdviceRelation): {
     body = remainder.trim();
     break;
   }
-  if (!body) return undefined;
-  let persists = false;
-  const englishPersistence = body.match(/^(.+?)\s+(?:persists?|continues?|remains?)$/iu);
-  if (englishPersistence) {
-    body = englishPersistence[1].trim();
-    persists = true;
-  } else if (/^ยัง/u.test(body)) {
-    body = body.replace(/^ยัง/u, "").trim();
-    persists = true;
-  }
-  return body ? { body, persists } : undefined;
+  return body || undefined;
 }
 
 function localizeConditionRelationText(
@@ -2951,38 +2913,33 @@ function localizeConditionRelationText(
 ): string | undefined {
   const text = trimSemanticText(relation.text ?? "");
   if (!text) return undefined;
-  const sourceLanguage = sourceLocale.toLowerCase().startsWith("th") ? "th" : "en";
-  const targetLanguage = targetLocale.toLowerCase().startsWith("th") ? "th" : "en";
+  const sourceLanguage = baseLanguageTag(sourceLocale) ?? sourceLocale.toLowerCase();
+  const targetLanguage = baseLanguageTag(targetLocale) ?? targetLocale.toLowerCase();
   if (sourceLanguage === targetLanguage) return text;
-  const parsed = conditionRelationBody(text, relation.kind);
-  if (!parsed) return text;
+  const rawBody = conditionRelationBody(text, relation.kind);
+  if (!rawBody) return text;
+  const sourceAdapter = getInstructionActionLocaleAdapter(sourceLocale);
+  const targetAdapter = getInstructionActionLocaleAdapter(targetLocale);
+  const parsed = sourceAdapter.parseConditionPersistence(rawBody);
   const definition = resolveSymptomDefinition(parsed.body);
   let body: string | undefined;
   if (definition) {
-    const symptom = targetLanguage === "th"
-      ? definition.i18n?.th ?? definition.text ?? definition.coding?.display
-      : definition.text ?? definition.coding?.display;
+    const symptom = localizedValue(definition.i18n, targetLocale) ??
+      definition.text ?? definition.coding?.display;
     if (!symptom) return text;
-    const normalizedSymptom = targetLanguage === "en"
-      ? symptom.charAt(0).toLowerCase() + symptom.slice(1)
-      : symptom;
-    body = parsed.persists
-      ? targetLanguage === "th"
-        ? `ยัง${definition.conditionI18n?.th ?? normalizedSymptom}`
-        : `${normalizedSymptom} persists`
-      : targetLanguage === "th"
-        ? definition.conditionI18n?.th ?? normalizedSymptom
-        : normalizedSymptom;
+    const conditionForm = localizedValue(definition.conditionI18n, targetLocale);
+    body = targetAdapter.renderConditionBody(symptom, conditionForm, parsed.persists);
   } else {
     const concept = resolveMedicationInstructionConcept(parsed.body);
     const action = concept ? undefined : resolveMedicationInstructionAction(parsed.body);
     if (!concept && !action) return text;
-    body = targetLanguage === "th"
-      ? concept?.i18n?.th ?? action?.i18n?.th ?? concept?.display ?? action?.display
-      : concept?.display ?? action?.display;
+    body = localizedValue(concept?.i18n, targetLocale) ??
+      localizedValue(action?.i18n, targetLocale) ??
+      concept?.display ?? action?.display;
   }
+  if (!body) return text;
   const lead = localizeAdviceRelation(relation.kind, targetLocale) ?? relation.kind;
-  return `${lead}${targetLanguage === "en" ? " " : ""}${body}`.trim();
+  return targetAdapter.joinConditionLead(lead, body);
 }
 
 export function realizeInstructionGraph(
@@ -3039,7 +2996,7 @@ export function realizeInstructionGraph(
     if (options?.onlyWarnings) return warning;
     return options?.includeWarnings !== false || !warning;
   });
-  const thai = locale.toLowerCase().startsWith("th");
+  const localeAdapter = getInstructionActionLocaleAdapter(locale);
   const nodes: Array<{
     start: number;
     end: number;
@@ -3049,8 +3006,9 @@ export function realizeInstructionGraph(
     conditionTargetActionIndex?: number;
     warning?: boolean;
   }> = [];
-  const targetLanguage = locale.toLowerCase().startsWith("th") ? "th" : "en";
-  const sourceLanguage = (graph.sourceLocale ?? "en").toLowerCase().startsWith("th") ? "th" : "en";
+  const targetLanguage = baseLanguageTag(locale) ?? locale.toLowerCase();
+  const sourceLocale = graph.sourceLocale ?? "en";
+  const sourceLanguage = baseLanguageTag(sourceLocale) ?? sourceLocale.toLowerCase();
   for (const frame of frames) {
     const definition = getMedicationInstructionAction(frame.predicate.lemma);
     const secondaryAdministration = Boolean(
@@ -3135,19 +3093,9 @@ export function realizeInstructionGraph(
       )
       : undefined;
     if (conditional) {
-      if (thai) {
-        const target = frames.find((frame) => frame.sequenceIndex === node.actionIndex);
-        const imperativeLink = target && !target.modality && target.polarity !== AdvicePolarity.Negate
-          ? "ให้"
-          : "";
-        output += `${imperativeLink}${node.text}`;
-      } else {
-        const lowered = node.text.charAt(0).toLowerCase() + node.text.slice(1);
-        const scoped = /^(?:should|must|may|might|can|could)\b/i.test(lowered)
-          ? `you ${lowered}`
-          : lowered;
-        output += `, ${scoped}`;
-      }
+      const target = frames.find((frame) => frame.sequenceIndex === node.actionIndex);
+      const imperative = Boolean(target && !target.modality && target.polarity !== AdvicePolarity.Negate);
+      output += localeAdapter.conditionalContinuation(node.text, imperative);
       continue;
     }
     const postposedConditional = Boolean(
@@ -3156,7 +3104,7 @@ export function realizeInstructionGraph(
       node.conditionTargetActionIndex === previous.actionIndex
     );
     if (postposedConditional) {
-      output += thai ? node.text : ` ${node.text}`;
+      output += localeAdapter.postposedCondition(node.text);
       continue;
     }
     const explicitRelation = previous?.understood && node.understood
@@ -3170,12 +3118,9 @@ export function realizeInstructionGraph(
       continue;
     }
     output += previous?.understood && node.understood && relationHasSemanticClass(explicitRelation?.kind, "sequence")
-      ? (thai ? " จากนั้น" : "; then ")
+      ? localeAdapter.sequenceSeparator()
       : "; ";
-    const continuationText = !thai && node.understood
-      ? node.text.charAt(0).toLowerCase() + node.text.slice(1)
-      : node.text;
-    output += continuationText;
+    output += localeAdapter.continuationText(node.text, node.understood);
   }
   return output;
 }

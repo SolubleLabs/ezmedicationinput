@@ -600,13 +600,7 @@ export interface AdviceFrame {
     i18n?: Record<string, string>;
     /** Persisted realization profile so caller-owned actions remain deterministic after parse/FHIR round-trip. */
     realizer?: MedicationInstructionActionRealizer;
-    realizerConfig?: {
-      thaiFallbackObject?: string;
-      thaiSuppressActivityConcepts?: string[];
-      thaiSuppressSiteConcepts?: string[];
-      thaiImplicitMedicationObject?: boolean;
-      englishDirectSiteObject?: boolean;
-    };
+    realizerConfig?: MedicationInstructionActionRealizerConfig;
     /** Internal/custom action coding followed by any trustworthy external mappings. */
     codings?: FhirCoding[];
   };
@@ -806,6 +800,7 @@ export type MedicationInstructionActionArgumentParser =
   | "container-activity"
   | "theme-destination-amount"
   | "object-amount-material"
+  | "amount-material-destination"
   | "amount-duration"
   | "object-duration"
   | "object-time"
@@ -828,6 +823,7 @@ export type MedicationInstructionActionRealizer =
   | "result"
   | "site-relation"
   | "object-amount-material"
+  | "amount-material-destination"
   | "prime"
   | "amount-duration"
   | "object-duration"
@@ -849,6 +845,19 @@ export interface MedicationInstructionActionContextualCodingRule {
   coding: FhirCoding;
 }
 
+export interface MedicationInstructionActionLocaleRealizerConfig {
+  fallbackObject?: string;
+  suppressActivityConcepts?: string[];
+  suppressSiteConcepts?: string[];
+  implicitMedicationObject?: boolean;
+  directSiteObject?: boolean;
+}
+
+export interface MedicationInstructionActionRealizerConfig {
+  /** Locale-specific realization behavior keyed by BCP-47-ish language tag. */
+  locales?: Record<string, MedicationInstructionActionLocaleRealizerConfig>;
+}
+
 export interface MedicationInstructionActionDefinition {
   /** Stable semantic action code. */
   code: string;
@@ -860,6 +869,8 @@ export interface MedicationInstructionActionDefinition {
   roundtripI18n?: Record<string, string>;
   /** Surface forms that should resolve to this action. */
   aliases?: string[];
+  /** Locale-specific parser lexemes. Display translation belongs in `i18n`; parsing aliases are explicit. */
+  localeAliases?: Record<string, string[]>;
   /** Discontinuous surface forms such as Thai `เอา X ออก` (remove X). */
   separableAliases?: Array<{ lead: string; particle: string }>;
   /** Whether this is a procedural action rather than ordinary administration advice. */
@@ -874,16 +885,7 @@ export interface MedicationInstructionActionDefinition {
     implicitMatchedConcept?: string;
     implicitMatchedRole?: AdviceArgumentRole;
   };
-  realizerConfig?: {
-    thaiFallbackObject?: string;
-    thaiSuppressActivityConcepts?: string[];
-    /** Thai can omit selected site concepts already lexicalized by the verb (e.g. สระผม + hair). */
-    thaiSuppressSiteConcepts?: string[];
-    /** Thai can omit an otherwise generic medication object for this action (e.g. รับประทานหลังอาหาร). */
-    thaiImplicitMedicationObject?: boolean;
-    /** English realizes the anatomical site as the verb's direct object instead of `to/at <site>`. */
-    englishDirectSiteObject?: boolean;
-  };
+  realizerConfig?: MedicationInstructionActionRealizerConfig;
   continuationLicenses?: Array<{
     candidateAction: string;
     previousConcepts?: string[];
@@ -931,6 +933,8 @@ export interface MedicationInstructionConceptDefinition {
   display: string;
   i18n?: Record<string, string>;
   aliases?: string[];
+  /** Locale-specific parser lexemes; display translations are not implicitly grammar-active. */
+  localeAliases?: Record<string, string[]>;
   coding?: FhirCoding;
   externalCodings?: FhirCoding[];
 }
