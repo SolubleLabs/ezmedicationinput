@@ -82,6 +82,59 @@ describe("topical and cosmetic clinician dogfood", () => {
     expect(formatSig(small.fhir, "long", { locale: "th" })).toContain("เล็กน้อย");
   });
 
+  it("parses dab application sites and morning schedules without intranasal ambiguity", () => {
+    const wart = parseSig("dab on wart in the morning");
+    expect(wart.meta.canonical.clauses[0]).toMatchObject({
+      method: { text: "Dab" },
+      route: { text: "topical" },
+      site: { text: "wart" },
+      schedule: { when: ["MORN"] },
+      leftovers: []
+    });
+    expect(wart.longText).toBe("Dab the medication in the morning on the wart.");
+    expect(formatSig(wart.fhir, "long")).toBe("Dab the medication in the morning on the wart.");
+
+    const finger = parseSig("dab on finger once daily in the morning");
+    expect(finger.meta.canonical.clauses[0]).toMatchObject({
+      method: { text: "Dab" },
+      route: { text: "topical" },
+      site: { text: "finger" },
+      schedule: {
+        timingCode: "QD",
+        frequency: 1,
+        period: 1,
+        periodUnit: "d",
+        when: ["MORN"]
+      },
+      leftovers: []
+    });
+    expect(finger.longText).toBe("Dab the medication once daily in the morning on the finger.");
+    expect(formatSig(finger.fhir, "long")).toBe(
+      "Dab the medication once daily in the morning on the finger."
+    );
+    expect(formatSig(finger.fhir, "long", { locale: "th" })).toContain("นิ้วมือ");
+
+    const intranasal = parseSig("1 spray IN bid");
+    expect(intranasal.meta.canonical.clauses[0]?.route?.text).toBe("intranasal");
+  });
+
+  it("treats warts as localized topical targets without false anatomical coding", () => {
+    const english = parseSig("apply to wart once daily");
+    expect(english.meta.canonical.clauses[0]?.site).toMatchObject({
+      text: "wart",
+      i18n: { th: "หูด" },
+      source: "text"
+    });
+    expect(english.fhir.site?.text).toBe("wart");
+    expect(english.fhir.site?.coding).toBeUndefined();
+    expect(formatSig(english.fhir, "long", { locale: "th" })).toBe("ทาบริเวณหูด วันละครั้ง.");
+
+    const thai = parseSig("ทาหูดวันละครั้ง", { locale: "th" });
+    expect(thai.meta.canonical.clauses[0]?.site?.text).toBe("wart");
+    expect(thai.meta.canonical.clauses[0]?.leftovers).toEqual([]);
+    expect(thai.longText).toBe("ทาบริเวณหูด วันละครั้ง.");
+  });
+
   it("distinguishes site-state modifiers from imperative clean/dry actions", () => {
     const resolved = resolveBodySitePhrase("clean dry skin", undefined, { allowTerminalModifierInheritance: true });
     expect(resolved?.coding?.code).toBe("181469002");

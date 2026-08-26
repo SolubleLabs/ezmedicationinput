@@ -20,6 +20,77 @@ describe("OPD normalized realization and advanced schedule semantics", () => {
     expect(eye.items[1].fhir.additionalInstruction).toBeUndefined();
   });
 
+  it("carries inherited administration through multi-stage schedule tapers", () => {
+    const source =
+      "1 drop ou q2h for 1 week, then q 4 h for 1 week, then qid for 1 week, " +
+      "then tid for 1 week, then bid for 1 week, then once daily";
+    const parsed = parseSig(source);
+
+    expect(parsed.count).toBe(6);
+    expect(parsed.meta.segments.map((segment) => segment.text)).toEqual([
+      "1 drop ou q2h for 1 week",
+      "q 4 h for 1 week",
+      "qid for 1 week",
+      "tid for 1 week",
+      "bid for 1 week",
+      "once daily"
+    ]);
+    expect(parsed.items.map((item) => item.meta.canonical.clauses[0]?.schedule?.timingCode)).toEqual([
+      "Q2H", "Q4H", "QID", "TID", "BID", "QD"
+    ]);
+    expect(parsed.items.map((item) => item.fhir.doseAndRate?.[0]?.doseQuantity)).toEqual(
+      Array.from({ length: 6 }, () => ({ value: 1, unit: "drop" }))
+    );
+    expect(parsed.items.map((item) => item.fhir.site?.text)).toEqual(
+      Array.from({ length: 6 }, () => "both eyes")
+    );
+    expect(parsed.items.slice(0, 5).map((item) => item.fhir.timing?.repeat?.boundsDuration)).toEqual(
+      Array.from({ length: 5 }, () => ({
+        value: 1, unit: "week", system: "http://unitsofmeasure.org", code: "wk"
+      }))
+    );
+    expect(parsed.items[5]?.fhir.timing?.repeat?.boundsDuration).toBeUndefined();
+    expect(parsed.items.every((item) => item.meta.canonical.clauses[0]?.leftovers.length === 0)).toBe(true);
+
+    expect(parsed.items.map((item) => formatSig(item.fhir, "long", { locale: "th" }))).toEqual([
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด ทุก 2 ชั่วโมง เป็นเวลา 1 สัปดาห์.",
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด ทุก 4 ชั่วโมง เป็นเวลา 1 สัปดาห์.",
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด วันละ 4 ครั้ง เป็นเวลา 1 สัปดาห์.",
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด วันละ 3 ครั้ง เป็นเวลา 1 สัปดาห์.",
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด วันละ 2 ครั้ง เป็นเวลา 1 สัปดาห์.",
+      "หยอดตาทั้งสองข้าง ครั้งละ 1 หยด วันละครั้ง."
+    ]);
+  });
+
+  it("treats terminal then-off as a typed discontinue instruction", () => {
+    const source =
+      "1 drop to ou q2h for 1 week, then q4h for 1 month, then qid for 2 weeks, " +
+      "then tid for 2 weeks, then once daily for 1 month, then off";
+    const parsed = parseSig(source);
+    expect(parsed.count).toBe(5);
+    expect(parsed.items.map((item) => item.meta.canonical.clauses[0]?.schedule?.timingCode)).toEqual([
+      "Q2H", "Q4H", "QID", "TID", "QD"
+    ]);
+    const final = parsed.items[4];
+    expect(final.meta.canonical.clauses[0]?.leftovers).toEqual([]);
+    expect(final.meta.canonical.clauses[0]?.instructionGraph?.actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ predicate: expect.objectContaining({ lemma: "stop" }) })
+      ])
+    );
+    expect(formatSig(final.fhir, "long", { locale: "th" })).toContain("หยุดใช้");
+    expect(formatSig(final.fhir, "long", { locale: "th" })).not.toContain("Off");
+
+    const bareOff = parseSig("off");
+    expect(bareOff.meta.leftoverText).toBe("off");
+
+    const boundedPause = parseSig("take 1 tab daily x21d then 7 days off");
+    expect(boundedPause.meta.leftoverText).toBeUndefined();
+    expect(boundedPause.meta.canonical.clauses.some((clause) =>
+      clause.instructionGraph?.actions.some((action) => action.predicate.lemma === "pause-use")
+    )).toBe(true);
+  });
+
   it.each([
     ["inhale 2 puffs before exercise", undefined],
     ["inhale 2 puffs 15 minutes before exercise", 15],
